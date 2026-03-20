@@ -1260,6 +1260,154 @@ def get_stock_history(symbol: str, days: int = 5) -> str:
 
 
 # -----------------------------
+# 热股榜和赚钱效应分析工具
+# -----------------------------
+@tool
+def get_hot_stocks_ranking(source: str = 'sina_amount', top_n: int = 20) -> str:
+    """获取热股榜排行，用于判断市场赚钱效应
+
+    参数：
+    - source: 数据源，可选：
+      - 'sina_amount': 新浪财经（按成交额） - 推荐
+      - 'sina_change': 新浪财经（按涨跌幅）
+      - 'eastmoney': 东方财富热股榜（按主力流入）
+      - 'composite': 综合热度算法（多维度综合排序）
+    - top_n: 获取前N只股票，默认20只
+
+    返回：热股榜排名数据，包括代码、名称、涨跌幅、成交额等
+    """
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent))
+        import hot_stocks_module
+
+        # 获取热股榜数据
+        df, source_name = hot_stocks_module.get_hot_stocks(source=source, top_n=top_n)
+
+        if df.empty:
+            return f"获取热股榜失败，请稍后重试"
+
+        # 格式化输出
+        result = f"【{source_name} - 热股榜TOP{top_n}】\n\n"
+
+        # 显示前N只股票
+        cols_to_show = ['代码', '名称', '最新价', '涨跌幅', '成交额(亿)', '热度排名']
+        available_cols = [col for col in cols_to_show if col in df.columns]
+
+        result += df[available_cols].head(top_n).to_string(index=False)
+        result += "\n"
+
+        # 计算10只的平均指标
+        top_10 = df.head(10)
+        avg_change = top_10['涨跌幅'].mean()
+        avg_amount = top_10['成交额(亿)'].mean() if '成交额(亿)' in top_10.columns else 0
+        limit_up_count = (top_10['涨跌幅'] >= 9.9).sum()
+
+        result += f"\n【前10名统计】\n"
+        result += f"平均涨幅: {avg_change:.2f}%\n"
+        result += f"平均成交额: {avg_amount:.2f}亿\n"
+        result += f"涨停数量: {limit_up_count}只\n"
+
+        return result
+
+    except Exception as e:
+        return f"获取热股榜失败: {str(e)}"
+
+
+@tool
+def analyze_profit_effect(source: str = 'sina_amount', top_n: int = 50) -> str:
+    """分析市场赚钱效应，基于热股榜数据综合评估
+
+    参数：
+    - source: 数据源，可选：
+      - 'sina_amount': 新浪财经（按成交额）- 推荐
+      - 'sina_change': 新浪财经（按涨跌幅）
+      - 'eastmoney': 东方财富热股榜
+      - 'composite': 综合热度算法
+    - top_n: 分析前N只热股，默认50只
+
+    返回：赚钱效应分析报告，包括等级、描述、基础统计、成交额分析、操作建议等
+    """
+    try:
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent))
+        import hot_stocks_module
+
+        # 获取热股榜数据
+        df, _ = hot_stocks_module.get_hot_stocks(source=source, top_n=top_n)
+
+        if df.empty:
+            return "获取热股榜数据失败，无法分析赚钱效应"
+
+        # 分析赚钱效应
+        analysis = hot_stocks_module.analyze_profit_effect(df)
+
+        if analysis.get('status') != 'success':
+            return f"赚钱效应分析失败: {analysis.get('message', '未知错误')}"
+
+        # 格式化输出结果
+        result = f"【市场赚钱效应分析】\n"
+        result += f"分析时间: {analysis.get('timestamp')}\n"
+        result += f"分析样本: {analysis.get('total_count')}只热股\n\n"
+
+        # 赚钱效应评级
+        profit_rating = analysis.get('赚钱效应评级', {})
+        result += f"【赚钱效应等级】\n"
+        result += f"等级: {profit_rating.get('等级', '未知')}\n"
+        result += f"描述: {profit_rating.get('描述', '无描述')}\n\n"
+
+        # 基础统计
+        basic_stats = analysis.get('基础统计', {})
+        result += f"【基础统计】\n"
+        result += f"平均涨幅: {basic_stats.get('平均涨幅', 0):.2f}%\n"
+        result += f"最大涨幅: {basic_stats.get('最大涨幅', 0):.2f}%\n"
+        result += f"最小涨幅: {basic_stats.get('最小涨幅', 0):.2f}%\n"
+        result += f"上涨股票: {basic_stats.get('上涨股票数', 0)}只\n"
+        result += f"下跌股票: {basic_stats.get('下跌股票数', 0)}只\n"
+        result += f"涨停股票: {basic_stats.get('涨停股票数', 0)}只\n\n"
+
+        # 成交额分析
+        if '成交额分析' in analysis:
+            amount_stats = analysis['成交额分析']
+            result += f"【成交额分析】\n"
+            result += f"总成交额: {amount_stats.get('总成交额(亿)', 0):.2f}亿\n"
+            result += f"平均成交额: {amount_stats.get('平均成交额(亿)', 0):.2f}亿\n"
+            result += f"成交额>10亿: {amount_stats.get('成交额>10亿的股票数', 0)}只\n"
+            result += f"成交额>5亿: {amount_stats.get('成交额>5亿的股票数', 0)}只\n\n"
+
+        # 换手率分析
+        if '换手率分析' in analysis:
+            turnover_stats = analysis['换手率分析']
+            result += f"【换手率分析】\n"
+            result += f"平均换手率: {turnover_stats.get('平均换手率', 0):.2f}%\n"
+            result += f"换手率>10%: {turnover_stats.get('换手率>10%的股票数', 0)}只\n"
+            result += f"换手率>20%: {turnover_stats.get('换手率>20%的股票数', 0)}只\n\n"
+
+        # 连板分析
+        if '连板分析' in analysis:
+            board_stats = analysis['连板分析']
+            result += f"【连板分析】\n"
+            result += f"最高连板: {board_stats.get('最高连板', 0)}板\n"
+            result += f"5板以上: {board_stats.get('5板以上', 0)}只\n"
+            result += f"3-4板: {board_stats.get('3-4板', 0)}只\n"
+            result += f"2板: {board_stats.get('2板', 0)}只\n"
+            result += f"首板: {board_stats.get('首板', 0)}只\n\n"
+
+        # 操作建议
+        suggestions = analysis.get('操作建议', [])
+        result += f"【操作建议】\n"
+        for i, suggestion in enumerate(suggestions, 1):
+            result += f"{i}. {suggestion}\n"
+
+        return result
+
+    except Exception as e:
+        return f"赚钱效应分析失败: {str(e)}"
+
+
+# -----------------------------
 # 构建Agent
 # -----------------------------
 def build_chat_agent() -> AgentExecutor:
@@ -1288,6 +1436,8 @@ def build_chat_agent() -> AgentExecutor:
         analyze_market_sentiment,  # 市场情绪分析
         get_continuous_limit_up_leaders,  # 连板梯队（准确连板数据）
         get_stock_history,  # 个股历史K线（使用AKShare）
+        get_hot_stocks_ranking,  # 热股榜排行
+        analyze_profit_effect,  # 赚钱效应分析
     ]
 
     # 创建短期记忆（保留最近5轮对话）
@@ -1317,7 +1467,9 @@ def build_chat_agent() -> AgentExecutor:
          "1. search_knowledge - 知识库搜索\n"
          "2. get_limit_up_stocks - 今日涨停\n"
          "3. get_continuous_limit_up_leaders - 连板梯队\n"
-         "4. analyze_market_sentiment - 市场情绪"),
+         "4. analyze_market_sentiment - 市场情绪\n"
+         "5. get_hot_stocks_ranking - 热股榜排行（判断市场热度）\n"
+         "6. analyze_profit_effect - 赚钱效应分析（评估市场机会）"),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad")

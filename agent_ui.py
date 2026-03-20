@@ -11,6 +11,7 @@ import gradio as gr
 from typing import List, Tuple, Optional
 import base64
 from pathlib import Path
+import pandas as pd
 
 # 设置API Key
 os.environ['DASHSCOPE_API_KEY'] = os.environ.get('DASHSCOPE_API_KEY', 'sk-54458b944b704de582533e1aa7290fca')
@@ -32,8 +33,8 @@ from test_agent_knowledge import (
     patched_subtract_client_response,
 )
 
-# 应用补丁
-ChatTongyi.subtract_client_response = patched_subtract_client_response
+# 应用补丁 - 注释掉因为导致输出重复和工具名称问题
+# ChatTongyi.subtract_client_response = patched_subtract_client_response
 
 # 全局变量
 AGENT_EXECUTOR = None
@@ -75,7 +76,12 @@ def initialize_agent():
         @tool
         def get_limit_up_stocks() -> str:
             """获取今日涨停股票列表，包括涨停原因、封单金额等信息"""
-            return fetch_limit_up_stocks()
+            df = fetch_limit_up_stocks()
+            if isinstance(df, pd.DataFrame):
+                if df.empty:
+                    return "今日暂无涨停股数据"
+                return f"今日涨停股共 {len(df)} 只（已过滤ST股）\n\n" + df.head(50).to_string(index=False)
+            return str(df)
 
         @tool
         def get_stock_info(stock_code: str) -> str:
@@ -158,7 +164,8 @@ def initialize_agent():
             memory=MEMORY,
             verbose=False,
             handle_parsing_errors=True,
-            max_iterations=5,
+            max_iterations=20,
+            early_stopping_method="generate",
         )
 
         print("✅ Agent系统初始化完成")
@@ -515,44 +522,28 @@ def create_ui():
             outputs=[chatbot, image_input, msg],
         )
 
-        # 快捷按钮
+        # 快捷按钮 - 直接传递参数而不是chain
         quick_q1.click(
-            fn=lambda h: (h + [("今天涨停股有哪些？", None)], "今天涨停股有哪些？"),
+            fn=lambda h: process_message("今天涨停股有哪些？", h, None),
             inputs=[chatbot],
-            outputs=[chatbot, msg],
-        ).then(
-            fn=submit_message,
-            inputs=[msg, chatbot, image_input],
             outputs=[chatbot, msg],
         )
 
         quick_q2.click(
-            fn=lambda h: (h + [("连板梯队情况如何？", None)], "连板梯队情况如何？"),
+            fn=lambda h: process_message("连板梯队情况如何？", h, None),
             inputs=[chatbot],
-            outputs=[chatbot, msg],
-        ).then(
-            fn=submit_message,
-            inputs=[msg, chatbot, image_input],
             outputs=[chatbot, msg],
         )
 
         quick_q3.click(
-            fn=lambda h: (h + [("当前市场情绪如何？", None)], "当前市场情绪如何？"),
+            fn=lambda h: process_message("当前市场情绪如何？", h, None),
             inputs=[chatbot],
-            outputs=[chatbot, msg],
-        ).then(
-            fn=submit_message,
-            inputs=[msg, chatbot, image_input],
             outputs=[chatbot, msg],
         )
 
         quick_q4.click(
-            fn=lambda h: (h + [("为什么会大幅回撤？", None)], "为什么会大幅回撤？"),
+            fn=lambda h: process_message("为什么会大幅回撤？", h, None),
             inputs=[chatbot],
-            outputs=[chatbot, msg],
-        ).then(
-            fn=submit_message,
-            inputs=[msg, chatbot, image_input],
             outputs=[chatbot, msg],
         )
 

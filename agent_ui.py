@@ -31,10 +31,12 @@ from test_agent_knowledge import (
     fetch_limit_up_stocks,
     analyze_continuous_limit_up,
     patched_subtract_client_response,
+    get_market_big_picture,
+    analyze_market_sentiment,
 )
 
-# 应用补丁 - 注释掉因为导致输出重复和工具名称问题
-# ChatTongyi.subtract_client_response = patched_subtract_client_response
+# 应用补丁 - 使用修复索引边界问题的版本
+ChatTongyi.subtract_client_response = patched_subtract_client_response
 
 # 全局变量
 AGENT_EXECUTOR = None
@@ -100,6 +102,16 @@ def initialize_agent():
                 return "图片分析器未初始化"
             return IMAGE_ANALYZER.analyze_image_with_description(image_path, question, "")
 
+        @tool
+        def get_market_sentiment_analysis() -> str:
+            """获取今日市场情绪分析，包括涨停数量、梯队完整度、赚钱效应等"""
+            return analyze_market_sentiment()
+
+        @tool
+        def get_market_big_picture_view(days: int = 5) -> str:
+            """获取市场大局观分析（多维度综合分析），包括：指数表现、中级周期、市场情绪、题材板块"""
+            return get_market_big_picture(days)
+
         # 创建工具列表
         tools = [
             search_trading_knowledge,
@@ -107,6 +119,8 @@ def initialize_agent():
             get_stock_info,
             analyze_continuous_boards,
             analyze_image,
+            get_market_sentiment_analysis,
+            get_market_big_picture_view,
         ]
 
         # 初始化LLM
@@ -116,6 +130,7 @@ def initialize_agent():
             dashscope_api_key=api_key,
             temperature=0.3,
             streaming=False,
+            incremental_output=False,
         )
 
         # 创建提示模板
@@ -127,19 +142,38 @@ def initialize_agent():
 2. 📚 知识库查询 - 交易策略、打板战法、市场情绪判断
 3. 📸 图片分析 - 识别和分析交易截图、K线图、复盘笔记
 4. 💡 专业建议 - 结合知识库给出操作建议和风险提示
+5. 🎯 大局观分析 - 多维度综合判断市场状况
+
+【回答原则：多日对比+大局观分析】
+每次回答市场相关问题时，必须从以下4个维度提供分析：
+1. 指数 - 沪深300/创业板指/上证指数等表现
+2. 中级周期 - 过去3-5天情绪趋势，判断当前周期位置
+3. 情绪 - 涨停股数量、梯队完整性、赚钱效应
+4. 题材 - 热门板块分布、领涨股情况
 
 工作原则：
 - 回答简洁专业，直接给出结论
+- 涉及市场分析时，优先调用 get_market_big_picture_view 获取大局观
+- 结合多日对比，判断市场强弱变化
 - 准确引用数据和知识库内容
 - 涉及风险时明确警示
 - 不展示冗长的思考过程
 
 可用工具：
+- get_market_big_picture_view: 大局观分析（指数+周期+情绪+题材，多日对比）【优先使用】
 - search_trading_knowledge: 搜索交易知识（策略、情绪、战法等）
+- get_market_sentiment_analysis: 市场情绪分析
 - get_limit_up_stocks: 获取今日涨停股
 - get_stock_info: 查询个股行情
 - analyze_continuous_boards: 分析连板梯队
 - analyze_image: 分析图片内容
+
+【回答格式】
+结构化输出：
+1. 一句话总结（基于大局观）
+2. 多维度分析（指数+周期+情绪+题材）
+3. 对比昨日/前几天的变化
+4. 具体建议（操作方向、仓位控制、风险提示）
 
 请根据用户问题选择合适的工具并给出专业回答。"""),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -165,7 +199,6 @@ def initialize_agent():
             verbose=False,
             handle_parsing_errors=True,
             max_iterations=20,
-            early_stopping_method="generate",
         )
 
         print("✅ Agent系统初始化完成")
@@ -251,8 +284,8 @@ def create_ui():
         button_primary_text_color="white",
         block_label_text_color="#e5e7eb",
         block_title_text_color="#f3f4f6",
-        input_background_fill="#ffffff",
-        input_background_fill_dark="#ffffff",
+        input_background_fill="#1f2937",
+        input_background_fill_dark="#1f2937",
     )
 
     with gr.Blocks(
@@ -363,10 +396,11 @@ def create_ui():
             background: rgba(16, 185, 129, 0.1) !important;
         }
 
-        /* 输入框样式优化 */
+        /* 输入框样式优化 - 使用深色背景和白色文字 */
         textarea, input[type="text"] {
-            background-color: #ffffff !important;
-            color: #1f2937 !important;
+            background-color: #1f2937 !important;
+            color: #ffffff !important;
+            border: 1px solid #374151 !important;
         }
 
         textarea::placeholder, input::placeholder {
@@ -374,10 +408,171 @@ def create_ui():
             opacity: 1;
         }
 
+        textarea:focus, input[type="text"]:focus {
+            background-color: #1f2937 !important;
+            color: #ffffff !important;
+            border-color: #2563eb !important;
+        }
+
         /* 聊天框消息样式 */
         .user-message {
             background: #2563eb !important;
             color: white !important;
+        }
+
+        /* 聊天框容器背景 */
+        .chatbot-container {
+            background-color: #0a0a0a !important;
+        }
+
+        /* 聊天气泡样式 */
+        .message.user {
+            background-color: #2563eb !important;
+            color: white !important;
+        }
+
+        .message.bot {
+            background-color: #374151 !important;
+            color: #ffffff !important;
+        }
+
+        /* 聊天框背景 - 使用浅色背景让回复清晰可见 */
+        .chatbot {
+            background-color: #1f2937 !important;
+        }
+
+        /* 聊天框内所有文字白色 */
+        .chatbot p {
+            color: #ffffff !important;
+        }
+
+        .chatbot pre {
+            color: #ffffff !important;
+            background-color: #111827 !important;
+            padding: 1rem;
+            border-radius: 8px;
+        }
+
+        .chatbot code {
+            color: #e5e7eb !important;
+            background-color: #374151 !important;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+
+        /* 用户消息 - 蓝色背景 */
+        .user-message {
+            background-color: #2563eb !important;
+            color: white !important;
+        }
+
+        /* AI回复 - 浅灰色背景 */
+        [data-testid="message"] {
+            background-color: #4b5563 !important;
+            color: #ffffff !important;
+        }
+
+        /* 确保所有消息内容可见 */
+        .chatbot .message {
+            color: #ffffff !important;
+        }
+
+        .chatbot .message p {
+            color: #ffffff !important;
+            line-height: 1.6;
+        }
+
+        .chatbot .message li {
+            color: #ffffff !important;
+        }
+
+        .chatbot .message ul,
+        .chatbot .message ol {
+            color: #ffffff !important;
+        }
+
+        /* Markdown样式 */
+        .markdown-body {
+            color: #ffffff !important;
+            background-color: #374151 !important;
+        }
+
+        .markdown-body p {
+            color: #ffffff !important;
+        }
+
+        .markdown-body li {
+            color: #ffffff !important;
+        }
+
+        /* Chatbot组件的具体消息样式 */
+        .chatbot {
+            --user-text-color: #ffffff !important;
+            --bot-text-color: #ffffff !important;
+            --bot-bg-color: #4b5563 !important;
+            --user-bg-color: #2563eb !important;
+        }
+
+        .chatbot .user {
+            background-color: var(--user-bg-color) !important;
+            color: var(--user-text-color) !important;
+        }
+
+        .chatbot .bot {
+            background-color: var(--bot-bg-color) !important;
+            color: var(--bot-text-color) !important;
+        }
+
+        .chatbot .message-content {
+            color: #ffffff !important;
+        }
+
+        /* 标签文字颜色 */
+        label {
+            color: #f3f4f6 !important;
+        }
+
+        /* 图片上传标签 */
+        .image-upload-area label {
+            color: #3b82f6 !important;
+        }
+
+        /* 按钮文字颜色 */
+        button {
+            color: #ffffff !important;
+        }
+
+        /* 快捷按钮 */
+        .quick-btn {
+            background: #1f2937 !important;
+            border: 1px solid #374151 !important;
+            color: #ffffff !important;
+        }
+
+        .quick-btn:hover {
+            background: #374151 !important;
+            border-color: #2563eb !important;
+            color: #ffffff !important;
+        }
+
+        /* Markdown内容文字颜色 */
+        .markdown {
+            color: #ffffff !important;
+        }
+
+        /* 链接颜色 */
+        a {
+            color: #60a5fa !important;
+        }
+
+        /* 全局文字颜色 - 针对常见元素 */
+        div, span, p, h1, h2, h3, h4, h5, h6 {
+            color: #f3f4f6 !important;
+        }
+
+        /* 保持图片上传标签蓝色 */
+        [data-testid="image"] label {
+            color: #3b82f6 !important;
         }
         """
     ) as demo:
@@ -442,47 +637,47 @@ def create_ui():
 
             # 右侧功能区
             with gr.Column(scale=1):
-                gr.Markdown("""
-                ### 快速查询
-                """)
-
-                with gr.Group():
-                    quick_q1 = gr.Button("📊 今日涨停", size="sm")
-                    quick_q2 = gr.Button("🔥 连板梯队", size="sm")
-                    quick_q3 = gr.Button("💹 市场情绪", size="sm")
-                    quick_q4 = gr.Button("📉 回撤分析", size="sm")
-
-                gr.Markdown("""
-                ---
-                ### 知识库
-                """)
-
-                gr.Markdown("""
-                <div style="font-size: 0.875rem; color: #9ca3af;">
-                • 打板战法<br>
-                • 情绪周期<br>
-                • 龙头特征<br>
-                • 风控原则
+                gr.HTML("""
+                <div style="color: #f3f4f6; font-size: 1.125rem; font-weight: 600; margin-bottom: 1rem;">
+                    ### 快速查询
                 </div>
                 """)
 
-                gr.Markdown("""
-                ---
-                ### 使用说明
+                with gr.Group():
+                    quick_q1 = gr.Button("📊 今日涨停", size="sm", elem_classes="quick-btn")
+                    quick_q2 = gr.Button("🔥 连板梯队", size="sm", elem_classes="quick-btn")
+                    quick_q3 = gr.Button("💹 市场情绪", size="sm", elem_classes="quick-btn")
+                    quick_q4 = gr.Button("📉 回撤分析", size="sm", elem_classes="quick-btn")
+
+                gr.HTML("""
+                <hr style="border-color: #374151; margin: 1.5rem 0;">
+                <div style="color: #f3f4f6; font-size: 1.125rem; font-weight: 600; margin-bottom: 1rem;">
+                    ### 知识库
+                </div>
+                <div style="font-size: 0.875rem; color: #9ca3af;">
+                    • 打板战法<br>
+                    • 情绪周期<br>
+                    • 龙头特征<br>
+                    • 风控原则
+                </div>
                 """)
 
-                gr.Markdown("""
+                gr.HTML("""
+                <hr style="border-color: #374151; margin: 1.5rem 0;">
+                <div style="color: #f3f4f6; font-size: 1.125rem; font-weight: 600; margin-bottom: 1rem;">
+                    ### 使用说明
+                </div>
                 <div style="font-size: 0.875rem; color: #9ca3af;">
-                <b>💬 文字查询</b><br>
-                在输入框输入问题<br><br>
+                    <b style="color: #f3f4f6;">💬 文字查询</b><br>
+                    在输入框输入问题<br><br>
 
-                <b>📸 图片分析</b><br>
-                • 拖拽图片到上传区域<br>
-                • 点击上传区域选择文件<br>
-                • 粘贴剪贴板图片<br><br>
+                    <b style="color: #f3f4f6;">📸 图片分析</b><br>
+                    • 拖拽图片到上传区域<br>
+                    • 点击上传区域选择文件<br>
+                    • 粘贴剪贴板图片<br><br>
 
-                <b>🔄 组合查询</b><br>
-                上传图片 + 输入问题
+                    <b style="color: #f3f4f6;">🔄 组合查询</b><br>
+                    上传图片 + 输入问题
                 </div>
                 """)
 

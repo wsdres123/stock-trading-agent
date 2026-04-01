@@ -110,8 +110,8 @@ class EnhancedRAG:
             if file_path.suffix in ['.xlsx', '.xls']:
                 continue
 
-            # 只处理txt和docx
-            if file_path.suffix not in ['.txt', '.docx']:
+            # 只处理txt、docx和csv
+            if file_path.suffix not in ['.txt', '.docx', '.csv']:
                 continue
 
             try:
@@ -122,6 +122,8 @@ class EnhancedRAG:
                     content = self._read_txt_file(str(file_path))
                 elif file_path.suffix == '.docx':
                     content, title = self._read_docx_file_with_title(str(file_path))
+                elif file_path.suffix == '.csv':
+                    content, title = self._read_csv_file(str(file_path))
 
                 # 过滤低质量内容
                 if not content or len(content.strip()) < 50:
@@ -185,6 +187,51 @@ class EnhancedRAG:
         except Exception as e:
             return "", Path(file_path).stem
 
+    def _read_csv_file(self, file_path: str) -> Tuple[str, str]:
+        """读取CSV文件并转换为结构化文本
+
+        返回：(内容, 标题)
+        """
+        try:
+            # 尝试不同的编码
+            for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']:
+                try:
+                    df = pd.read_csv(file_path, encoding=encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                return "", Path(file_path).stem
+
+            title = Path(file_path).stem
+            content_parts = [f"# {title}\n"]
+
+            # 将DataFrame转换为易读的文本格式
+            # 每一行转换为一个结构化的段落
+            for idx, row in df.iterrows():
+                row_text_parts = []
+                for col_name, value in row.items():
+                    if pd.notna(value) and str(value).strip():
+                        row_text_parts.append(f"{col_name}: {value}")
+
+                if row_text_parts:
+                    # 每一行数据作为一个段落
+                    content_parts.append("## 模式条目 " + str(idx + 1))
+                    content_parts.append("\n".join(row_text_parts))
+                    content_parts.append("")  # 空行分隔
+
+            content = "\n".join(content_parts)
+
+            # 如果内容太短，尝试另一种格式（表格形式）
+            if len(content) < 100:
+                content = f"# {title}\n\n{df.to_string(index=False)}"
+
+            return content, title
+
+        except Exception as e:
+            print(f"\n⚠️  CSV读取失败 {file_path}: {e}")
+            return "", Path(file_path).stem
+
     def build_enhanced_index(self):
         """构建增强版索引
 
@@ -193,9 +240,10 @@ class EnhancedRAG:
         2. 创建向量索引（FAISS）
         3. 创建BM25关键词索引
         4. 组合成混合检索器
+        5. 并发加载所有文档，保持性能
         """
-        # 加载文档
-        self.documents = self.load_documents(max_files=15)
+        # 加载所有文档（使用None表示不限制数量）
+        self.documents = self.load_documents(max_files=None)
 
         if not self.documents:
             print("⚠️  没有加载到知识文档")

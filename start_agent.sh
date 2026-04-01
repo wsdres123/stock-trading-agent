@@ -1,37 +1,31 @@
 #!/bin/bash
+# 启动agent_ui.py的脚本
+# 确保使用最新的代码和正确的环境变量
 
-# 智能股票分析Agent启动脚本
+echo "======================================================================"
+echo "启动智能股票分析Agent Web UI"
+echo "======================================================================"
+echo ""
 
-echo "========================================================================"
-echo "🚀 智能股票分析Agent - 完整版"
-echo "========================================================================"
+# 设置API KEY
+export DASHSCOPE_API_KEY=sk-54458b944b704de582533e1aa7290fca
 
-# 检查API Key
-if [ -z "$DASHSCOPE_API_KEY" ]; then
+# 设置库路径（修复GLIBCXX依赖问题）
+export LD_LIBRARY_PATH=/home/lixiang/anaconda3/lib:$LD_LIBRARY_PATH
+echo "✅ 已设置库路径: $LD_LIBRARY_PATH"
+echo ""
+
+# 检查是否有旧进程在运行
+OLD_PID=$(ps aux | grep "python.*agent_ui.py" | grep -v grep | awk '{print $2}')
+if [ ! -z "$OLD_PID" ]; then
+    echo "⚠️  检测到旧进程正在运行 (PID: $OLD_PID)"
+    echo "正在终止旧进程..."
+    kill -9 $OLD_PID
+    sleep 2
+    echo "✅ 旧进程已终止"
     echo ""
-    echo "❌ 错误：未设置 DASHSCOPE_API_KEY 环境变量"
-    echo ""
-    echo "请先设置API Key："
-    echo "  export DASHSCOPE_API_KEY='your-api-key'"
-    echo ""
-    echo "获取API Key："
-    echo "  https://dashscope.console.aliyun.com/"
-    echo ""
-    exit 1
 fi
 
+echo "🚀 启动新的Agent UI进程..."
 echo ""
-echo "✅ API Key已设置"
-echo ""
-
-# 检查Python版本
-python_cmd="python3"
-if ! command -v python3 &> /dev/null; then
-    python_cmd="python"
-fi
-
-echo "使用Python: $python_cmd"
-echo ""
-
-# 运行系统
-exec $python_cmd test_agent_with_image.py
+python agent_ui.py

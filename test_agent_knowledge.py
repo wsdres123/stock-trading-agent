@@ -862,22 +862,22 @@ def fetch_board_ranking():
 
 
 def analyze_continuous_limit_up():
-    """分析连板股梯队（查询所有非ST涨停股）- 简化快速版"""
+    """分析连板股梯队（查询所有非ST涨停股）- 增强版"""
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         from datetime import datetime
         import os
 
-        # 检查今日缓存
+        # 检查今日缓存（缩短到30分钟，避免盘中数据过时）
         today = datetime.now().strftime('%Y%m%d')
         cache_file = f'./data/limit_up_history/{today}_board_cache.json'
 
-        # 如果缓存存在且不超过1小时，直接使用缓存
+        # 如果缓存存在且不超过30分钟，直接使用缓存
         if os.path.exists(cache_file):
             try:
                 cache_age = time.time() - os.path.getmtime(cache_file)
-                if cache_age < 3600:
+                if cache_age < 1800:  # 30分钟
                     with open(cache_file, 'r', encoding='utf-8') as f:
                         cached_data = json.load(f)
                     return cached_data['summary']
@@ -893,16 +893,16 @@ def analyze_continuous_limit_up():
         df_zt_sorted = df_zt.sort_values('成交额(亿)', ascending=False)
         total_count = len(df_zt_sorted)
 
-        # 只分析前50只（加快速度）
+        # 关键修改：分析前80只（覆盖更多股票，防止错过新高板）
         results = []
         board_stats = {}
         max_board = 1
         max_board_stocks = []
         failed_count = 0
 
-        # 准备前50只股票数据
+        # 准备前80只股票数据
         stock_data = []
-        for idx, (_, row) in enumerate(df_zt_sorted.head(50).iterrows(), 1):
+        for idx, (_, row) in enumerate(df_zt_sorted.head(80).iterrows(), 1):
             name = row['名称']
             code = row.get('代码', '').replace('sh', '').replace('sz', '').replace('bj', '')
             pct = row['涨跌幅']
@@ -913,7 +913,7 @@ def analyze_continuous_limit_up():
         def process_stock(stock_info):
             idx, name, code, pct, amount = stock_info
             # 增加重试次数，避免API不稳定导致全0
-            board_days = calculate_continuous_limit_up_days_with_retry(code, max_retries=2)
+            board_days = calculate_continuous_limit_up_days_with_retry(code, max_retries=3)
             if board_days > 0:
                 board_label = f"{board_days}板"
             else:
@@ -922,7 +922,7 @@ def analyze_continuous_limit_up():
             return (idx, name, code, pct, amount, board_days, board_label)
 
         results_dict = {}
-        with ThreadPoolExecutor(max_workers=100) as executor:
+        with ThreadPoolExecutor(max_workers=50) as executor:
             future_to_stock = {executor.submit(process_stock, stock): stock for stock in stock_data}
             for future in as_completed(future_to_stock):
                 try:
@@ -930,7 +930,8 @@ def analyze_continuous_limit_up():
                     results_dict[idx] = {
                         'text': f"{name}({code}) {pct:.2f}% 成交额{amount:.2f}亿 [{board_label}]",
                         'board_days': board_days,
-                        'name': name
+                        'name': name,
+                        'amount': amount
                     }
                     if board_days > 0:
                         board_stats[board_days] = board_stats.get(board_days, 0) + 1
@@ -941,26 +942,32 @@ def analyze_continuous_limit_up():
                             max_board_stocks.append(name)
                     else:
                         failed_count += 1
-                except:
+                except Exception as e:
                     idx, name, code, pct, amount = future_to_stock[future]
+                    print(f"股票 {name} 分析失败: {e}")
                     results_dict[idx] = {
                         'text': f"{name}({code}) {pct:.2f}% 成交额{amount:.2f}亿 [首板]",
                         'board_days': 0,
-                        'name': name
+                        'name': name,
+                        'amount': amount
                     }
                     failed_count += 1
 
         results = [results_dict[i+1]['text'] for i in range(len(stock_data))]
 
         # 构建简洁summary
-        summary = f"📊 今日涨停股共 {total_count} 只（已过滤ST股），已分析成交额前50只\n\n"
+        analyzed_count = len([r for r in results if r])
+        summary = f"📊 今日涨停股共 {total_count} 只（已过滤ST股），已分析成交额前{analyzed_count}只\n"
+
+        if failed_count > 0:
+            summary += f"⚠️  注意: {failed_count}只股票可能是API获取失败被标记为首板\n"
 
         if board_stats:
-            summary += f"🔥 最高板: {max_board}板"
+            summary += f"\n🔥 最高板: {max_board}板"
             if max_board > 1 and max_board_stocks:
-                summary += f"（{', '.join(max_board_stocks[:3])}）"
+                summary += f"（{', '.join(max_board_stocks[:5])}）"
             summary += "\n"
-            summary += f"📈 连板统计: " + ", ".join([f"{k}板×{v}只" for k, v in sorted(board_stats.items(), reverse=True)]) + "\n\n"
+            summary += f"📈 连板统计: " + ", ".join([f"{k}板×{v}只" for k, v in sorted(board_stats.items(), reverse=True)]) + "\n"
 
         # 按连板分组
         high_boards = {}
@@ -978,23 +985,27 @@ def analyze_continuous_limit_up():
                     high_boards[board_num].append(result)
 
         # 显示连板
-        summary += "💹 涨停梯队：\n\n"
+        summary += "\n💹 涨停梯队：\n\n"
         for board_num in sorted(high_boards.keys(), reverse=True):
             stocks = high_boards[board_num]
+            # �成交额从高到低排序
+            stocks_sorted = sorted(stocks, key=lambda x: float(x.split('成交额')[1].split('亿')[0]) if '成交额' in x else 0, reverse=True)
             summary += f"【{board_num}板】({len(stocks)}只)：\n"
-            for stock in stocks[:10]:  # 每个梯队最多显示10只
+            for stock in stocks_sorted[:15]:  # 每个梯队最多显示15只
                 summary += f"  {stock}\n"
-            if len(stocks) > 10:
-                summary += f"  ... 还有{len(stocks)-10}只\n"
+            if len(stocks_sorted) > 15:
+                summary += f"  ... 还有{len(stocks_sorted)-15}只\n"
             summary += "\n"
 
-        # 显示首板前15只
+        # 显示首板前20只
         if first_boards:
-            summary += f"【首板】({len(first_boards)}只，显示前15只)：\n"
-            for stock in first_boards[:15]:
+            # 按成交额从高到低排序
+            first_boards_sorted = sorted(first_boards, key=lambda x: float(x.split('成交额')[1].split('亿')[0]) if '成交额' in x else 0, reverse=True)
+            summary += f"【首板】({len(first_boards)}只，显示前20只)：\n"
+            for stock in first_boards_sorted[:20]:
                 summary += f"  {stock}\n"
-            if len(first_boards) > 15:
-                summary += f"  ... 还有{len(first_boards)-15}只\n"
+            if len(first_boards_sorted) > 20:
+                summary += f"  ... 还有{len(first_boards_sorted)-20}只\n"
 
         # 保存缓存
         try:
@@ -1007,6 +1018,8 @@ def analyze_continuous_limit_up():
         return summary
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return f"❌ 分析连板失败: {str(e)}"
 
 
@@ -1252,6 +1265,11 @@ def analyze_market_sentiment() -> str:
 
     返回：综合市场情绪报告
     """
+    return _analyze_market_sentiment_impl()
+
+
+def _analyze_market_sentiment_impl() -> str:
+    """内部实现函数（不带@tool装饰器，可以被其他函数直接调用）"""
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from datetime import datetime
@@ -1896,7 +1914,7 @@ def analyze_profit_effect(source: str = 'sina_amount', top_n: int = 50) -> str:
 
 
 def fetch_index_data(index_codes=['sh000300', 'sz399006', 'bj899050']):
-    """获取主要指数数据
+    """获取主要指数数据（直接用新浪实时接口）
 
     参数：
     - index_codes: 指数代码列表
@@ -1910,102 +1928,258 @@ def fetch_index_data(index_codes=['sh000300', 'sz399006', 'bj899050']):
     """
     try:
         result = []
+
+        # 定义指数信息映射
+        index_info = {
+            '000300': {'name': '沪深300', 'sina_id': 's_sh000300'},
+            '000001': {'name': '上证指数', 'sina_id': 's_sh000001'},
+            '399006': {'name': '创业板指', 'sina_id': 's_sz399006'},
+            '399001': {'name': '深证成指', 'sina_id': 's_sz399001'},
+            '899050': {'name': '北证50', 'sina_id': 's_bj899050'},
+        }
+
+        import time
+
         for code in index_codes:
             try:
-                # 使用akshare获取指数实时行情
+                symbol = code[2:]  # 去掉前缀，只保留数字部分
+                info = index_info.get(symbol)
+                if not info:
+                    continue
+
+                sina_id = info['sina_id']
+                name = info['name']
+
+                # 使用新浪实时接口
+                url = f'http://hq.sinajs.cn/list={sina_id}'
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': 'https://finance.sina.com.cn/',
+                }
+
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    # 解析响应：var hq_str_s_sh000001="上证指数,3891.8605,-31.4264,-0.80,6067049,..."
+                    content = resp.text
+                    start = content.find('"')
+                    end = content.rfind('"')
+                    if start > 0 and end > start:
+                        data_str = content[start+1:end]
+                        parts = data_str.split(',')
+
+                        if len(parts) >= 4:
+                            # 新浪指数数据格式：名称,当前值,涨跌额,涨跌幅,成交量...
+                            current = float(parts[1]) if parts[1] else 0
+                            change = float(parts[2]) if parts[2] else 0
+                            pct_change = float(parts[3]) if parts[3] else 0
+
+                            result.append({
+                                '代码': code,
+                                '名称': name,
+                                '最新价': current,
+                                '涨跌幅': pct_change,
+                                '涨跌额': change,
+                                '今开': 0,  # 新浪指数接口没有开盘价
+                                '最高': 0,  # 新浪指数接口没有最高价
+                                '最低': 0,  # 新浪指数接口没有最低价
+                                '成交量': int(float(parts[4])) if len(parts) > 4 and parts[4] else 0,
+                            })
+                            continue
+
+                # 如果新浪失败，尝试akshare（如果可用）
                 if HAS_AKSHARE:
-                    import akshare as ak
-                    if code.startswith('sh'):
-                        symbol = code[2:]
-                        df = ak.stock_zh_index_spot()
-                        index_data = df[df['代码'] == symbol]
-                        if not index_data.empty:
-                            row = index_data.iloc[0]
-                            # 解析名称映射
-                            name_map = {
-                                '000300': '沪深300',
-                                '000001': '上证指数',
-                            }
-                            name = name_map.get(symbol, row.get('名称', f'指数{symbol}'))
+                    try:
+                        import akshare as ak
+                        end_date = pd.Timestamp.now().strftime('%Y%m%d')
+                        start_date = (pd.Timestamp.now() - pd.Timedelta(days=3)).strftime('%Y%m%d')
+                        df_idx = ak.index_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+
+                        if not df_idx.empty:
+                            row = df_idx.iloc[-1]
+                            if len(df_idx) >= 2:
+                                prev_close = df_idx.iloc[-2]['收盘']
+                                curr_close = row['收盘']
+                                pct_chg = ((curr_close - prev_close) / prev_close) * 100
+                            else:
+                                pct_chg = 0
+
                             result.append({
                                 '代码': code,
                                 '名称': name,
-                                '最新价': float(row.get('最新价', 0)),
-                                '涨跌幅': float(row.get('涨跌幅', 0)),
-                                '涨跌额': float(row.get('涨跌额', 0)),
-                                '今开': float(row.get('今开', 0)),
+                                '最新价': float(row.get('收盘', 0)),
+                                '涨跌幅': pct_chg,
+                                '涨跌额': 0,
+                                '今开': float(row.get('开盘', 0)),
                                 '最高': float(row.get('最高', 0)),
                                 '最低': float(row.get('最低', 0)),
-                                '成交量': int(row.get('成交量', 0)),
+                                '成交量': int(row.get('成交量', 0)) if pd.notna(row.get('成交量')) else 0,
                             })
-                    elif code.startswith('sz'):
-                        symbol = code[2:]
-                        df = ak.stock_zh_index_spot()
-                        index_data = df[df['代码'] == symbol]
-                        if not index_data.empty:
-                            row = index_data.iloc[0]
-                            name_map = {
-                                '399006': '创业板指',
-                                '399001': '深证成指',
-                            }
-                            name = name_map.get(symbol, row.get('名称', f'指数{symbol}'))
-                            result.append({
-                                '代码': code,
-                                '名称': name,
-                                '最新价': float(row.get('最新价', 0)),
-                                '涨跌幅': float(row.get('涨跌幅', 0)),
-                                '涨跌额': float(row.get('涨跌额', 0)),
-                                '今开': float(row.get('今开', 0)),
-                                '最高': float(row.get('最高', 0)),
-                                '最低': float(row.get('最低', 0)),
-                                '成交量': int(row.get('成交量', 0)),
-                            })
+                    except:
+                        pass
 
             except Exception as e:
-                # 如果akshare失败，使用新浪API作为备份
-                try:
-                    # 新浪API支持指数查询
-                    if code.startswith('sh'):
-                        node = 'shzs'  # 上证指数
-                        symbol = code[2:]
-                    elif code.startswith('sz'):
-                        node = 'szzs'  # 深证指数
-                        symbol = code[2:]
-                    elif code.startswith('bj'):
-                        node = 'bjzs'
-                        symbol = code[2:]
-                    else:
-                        continue
-
-                    df = fetch_sina_stock_data(node=node, num=100)
-                    if not df.empty:
-                        # 查找对应的指数
-                        df['pure_code'] = df['代码'].str.replace('sh', '').str.replace('sz', '').str.replace('bj', '')
-                        idx_row = df[df['pure_code'] == symbol]
-                        if not idx_row.empty:
-                            row = idx_row.iloc[0]
-                            result.append({
-                                '代码': code,
-                                '名称': row.get('名称', f'指数{symbol}'),
-                                '最新价': float(row.get('最新价', 0)),
-                                '涨跌幅': float(row.get('涨跌幅', 0)),
-                                '涨跌额': float(row.get('涨跌额', 0)),
-                                '今开': float(row.get('今开', 0)),
-                                '最高': float(row.get('最高', 0)),
-                                '最低': float(row.get('最低', 0)),
-                                '成交量': int(row.get('成交量', 0)),
-                            })
-                except:
-                    pass
+                print(f"获取指数 {code} 失败: {e}")
+                continue
 
         if result:
             return pd.DataFrame(result)
         else:
+            print(f"警告: 所有指数数据获取失败")
             return pd.DataFrame()
 
     except Exception as e:
         print(f"获取指数数据失败: {e}")
         return pd.DataFrame()
+
+
+def fetch_index_historical_data(index_code='000300', days=10):
+    """获取指数历史K线数据（用于分析周期）
+
+    参数：
+    - index_code: 指数代码（如 '000300' 为沪深300）
+    - days: 获取天数，默认10天
+
+    返回：DataFrame，包含日期、收盘价、涨跌幅、成交量等
+    """
+    if not HAS_AKSHARE:
+        return pd.DataFrame()
+
+    try:
+        import akshare as ak
+
+        # 计算日期范围
+        end_date = pd.Timestamp.now().strftime('%Y%m%d')
+        start_date = (pd.Timestamp.now() - pd.Timedelta(days=days*2)).strftime('%Y%m%d')
+
+        # 获取指数历史数据
+        df = ak.index_zh_a_hist(
+            symbol=index_code,
+            period="daily",
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # 统一列名
+        column_mapping = {
+            '日期': '日期',
+            '收盘': '收盘价',
+            '开盘': '开盘价',
+            '最高': '最高价',
+            '最低': '最低价',
+            '成交量': '成交量',
+            '涨跌幅': '涨跌幅'
+        }
+        df = df.rename(columns=column_mapping)
+
+        # 转换并排序
+        df['日期'] = pd.to_datetime(df['日期'])
+        df = df.sort_values('日期', ascending=False).head(days)
+
+        return df
+
+    except Exception as e:
+        return pd.DataFrame()
+
+
+def judge_index_cycle(days=10):
+    """判断指数周期（A/B/C/D周期）
+
+    判断规则：
+    - B周期：指数缩量震荡
+    - C周期：指数放量单边上涨（大牛市，普涨，赚钱效应爆炸）
+    - D周期：指数单边下跌
+    - A周期：
+      * 共振A：指数共振上涨，接力空间高度打开，有主线
+      * 背离A：指数下跌但情绪活跃，接力空间高度打开
+
+    参数：
+    - days: 分析天数，默认10天
+
+    返回：dict，包含周期类型、涨跌幅情况、成交量情况
+    """
+    try:
+        # 获取沪深300作为代表
+        df = fetch_index_historical_data('000300', days)
+
+        if df.empty or len(df) < 3:
+            return {'cycle': '无法判断', 'reason': '数据不足'}
+
+        df = df.sort_values('日期', ascending=True).reset_index(drop=True)
+
+        # 1. 计算涨跌幅趋势
+        overall_change = df['涨跌幅'].sum()
+        last_5_change = df['涨跌幅'].tail(5).sum()
+
+        # 2. 判断是否单边下跌（D周期）
+        if overall_change < -5 and last_5_change < -3:
+            return {
+                'cycle': 'D周期',
+                'sub_type': '单边下跌周期',
+                'overall_change': overall_change,
+                'last_5_change': last_5_change,
+                'trend': '下跌',
+                'reason': f'指数累计{overall_change:.2f}%，最近5日{last_5_change:.2f}%，单边下跌'
+            }
+
+        # 3. 判断是否放量单边上涨（C周期）
+        # 最近3天均上涨
+        last_3_positive = all(df['涨跌幅'].tail(3) > 0)
+        # 整体涨幅大
+        strong_rise = overall_change > 5 and last_5_change > 3
+
+        if last_3_positive and strong_rise:
+            return {
+                'cycle': 'C周期',
+                'sub_type': '放量上涨大牛市',
+                'overall_change': overall_change,
+                'last_5_change': last_5_change,
+                'trend': '强势上涨',
+                'reason': f'指数持续上涨，累计{overall_change:.2f}%，普涨特征明显'
+            }
+
+        # 4. 判断缩量震荡（B周期）
+        # 涨跌幅都在小范围内
+        max_range = df['收盘价'].max() - df['收盘价'].min()
+        avg_price = df['收盘价'].mean()
+        volatility = (max_range / avg_price) * 100
+
+        if volatility < 5 and abs(overall_change) < 3:
+            return {
+                'cycle': 'B周期',
+                'sub_type': '缩量震荡周期',
+                'overall_change': overall_change,
+                'last_5_change': last_5_change,
+                'trend': '震荡',
+                'volatility': volatility,
+                'reason': f'波动率{volatility:.2f}%较低，指数缩量震荡'
+            }
+
+        # 5. A周期判断（需要配合情绪数据）
+        # 默认根据指数情况判断共振A或背离A
+        if overall_change > 0:
+            return {
+                'cycle': 'A周期（共振A）',
+                'sub_type': '指数共振上涨周期',
+                'overall_change': overall_change,
+                'last_5_change': last_5_change,
+                'trend': '震荡上涨',
+                'reason': '指数震荡上涨，需关注是否打开接力空间和出现主线'
+            }
+        else:
+            return {
+                'cycle': 'A周期（背离A）',
+                'sub_type': '指数背离活跃周期',
+                'overall_change': overall_change,
+                'last_5_change': last_5_change,
+                'trend': '震荡偏弱',
+                'reason': '指数偏弱但情绪活跃，可能形成背离A（需要配合情绪分析）'
+            }
+
+    except Exception as e:
+        return {'cycle': '无法判断', 'reason': str(e)}
 
 
 def analyze_multi_day_sentiment(days=5):
@@ -2061,23 +2235,87 @@ def classify_sector_by_name(stock_name):
 
     返回：板块名称
     """
-    # 简单的关键词匹配
+    # 扩展的关键词匹配（细分概念/题材）
     sector_keywords = {
-        'AI': ['人工智能', 'AI', '算力', '芯片', '半导体', '存储', 'CPO', '光模块',
-               '服务器', '云计算', '数据中心', 'GPU', 'CPU', '集成电路'],
-        '新能源': ['新能源', '光伏', '风电', '储', '电池', '锂电', '充电', '电动',
-                   '太阳能', '风电', '储能', '能源'],
-        '汽车': ['汽车', '整车', '车', '汽配', '车轮', '轮胎', '零部件'],
-        '医药': ['医药', '药', '生物', '疫苗', '医疗', '器械', '健康'],
-        '消费': ['食品', '饮料', '酒', '白酒', '家电', '零售', '服装', '纺织',
-                 '珠宝', '化妆品', '调味品', '餐饮'],
-        '房地产': ['地产', '房地产', '物业', '建筑', '装修', '建材'],
-        '金融': ['银行', '保险', '证券', '券商', '信托', '租赁'],
-        '科技': ['科技', '软件', '互联网', '游戏', '传媒', '影视', '通信',
-                 '5G', '6G', '网络', '数据', '信息'],
-        '资源': ['黄金', '白银', '铜', '铝', '锂', '钴', '镍', '矿产', '金属',
-                 '石油', '煤炭', '化工', '能源', '稀土'],
-        '电力': ['电力', '电网', '发电', '供电', '水电', '火电', '核电'],
+        # 科技细分
+        'AI/算力': ['人工智能', 'AI', '算力', '智能', '大模型', '算法', 'ChatGPT', 'GPT', 'AIGC', '曙光', '寒武纪', '海光'],
+        '芯片/半导体': ['芯片', '半导体', 'IC', '集成电路', '芯原', '晶圆', '封测', 'EDA', '光刻', '北方华创', '中微', '兆易', '韦尔', '卓胜微'],
+        'CPO/光模块': ['CPO', '光模块', '光通信', '光器件', '光芯片', '激光', '光电', '中际', '天孚', '新易盛', '光迅'],
+        '云计算/数据中心': ['云计算', '数据中心', '服务器', 'IDC', '云服务', '浪潮', '宝信'],
+        '存储': ['存储', '存储器', 'SSD', '闪存', 'DRAM', 'NAND', '兆易', '江波龙', '佰维'],
+        '信创/自主可控': ['信创', '国产', '自主', '安全', '麒麟', '统信', '太极'],
+        '通信/5G': ['通信', '5G', '6G', '基站', '天线', '射频', '通讯', '中兴', '烽火', '亨通'],
+        '软件/互联网': ['软件', '互联网', '网络', '游戏', '传媒', '影视', '数据', '信息', '用友', '金蝶'],
+
+        # 新能源细分
+        '光伏': ['光伏', '太阳能', '逆变器', '硅片', '电池片', '隆基', '通威', '阳光电源', '晶澳', '天合'],
+        '风电': ['风电', '风力', '风能', '海上风电', '明阳', '金风', '运达'],
+        '储能': ['储能', '锂电池', '钠电池', '电化学', '宁德', '比亚迪电池'],
+        '锂电/新能源电池': ['锂电', '锂矿', '锂', '钴', '镍', '正极', '负极', '隔膜', '电解液', '天齐', '赣锋', '恩捷', '璞泰来'],
+        '充电桩': ['充电', '充电桩', '快充', '特锐德', '盛弘'],
+        '氢能源': ['氢能', '氢燃料', '制氢', '氢气', '燃料电池'],
+
+        # 汽车细分
+        '新能源汽车': ['新能源车', '电动车', '比亚迪', '特斯拉', '理想', '蔚来', '小鹏'],
+        '智能驾驶': ['自动驾驶', '智驾', '辅助驾驶', 'ADAS', '激光雷达', '毫米波'],
+        '汽车零部件': ['汽配', '零部件', '轮胎', '轴承', '齿轮', '底盘'],
+        '整车': ['汽车', '整车', '乘用车', '商用车'],
+
+        # 医药细分
+        '创新药/生物制药': ['医药', '药业', '制药', '生物制药', '生物药', '生物科技', '创新药', 'CXO', '研发外包', '临床',
+                         '康德', '药明', '泰格', '恒瑞', '医学', '药物', '复星医药', '科伦', '华东医药', '丽珠',
+                         '康龙', '君实', '信达', '百济', '贝达', '荣昌', '亚盛', '基石', '康宁杰瑞'],
+        '医疗器械': ['医疗器械', '器械', '耗材', '影像', '体外诊断', 'IVD', '迈瑞', '诊断', '医疗设备', '骨科',
+                   '乐普', '鱼跃', '威高', '微创', '安图', '万孚', '理邦'],
+        '疫苗': ['疫苗', '免疫', '预防', '生物制品', '智飞', '沃森', '康泰', '康希诺', '万泰'],
+        '中药': ['中药', '中医', '中成药', '片仔癀', '云南白药', '同仁堂', '东阿', '阿胶', '天士力'],
+        '原料药/API': ['原料药', 'API', '中间体', '维生素', '特色原料药', '司太立', '普洛', '仙琚'],
+
+        # 消费细分
+        '白酒': ['白酒', '酒', '茅台', '五粮液'],
+        '食品饮料': ['食品', '饮料', '乳业', '调味品', '零食'],
+        '消费电子': ['消费电子', '手机', '耳机', '智能穿戴', '平板'],
+        '家电': ['家电', '空调', '冰箱', '洗衣机', '电视'],
+        '纺织服装': ['纺织', '服装', '服饰', '面料'],
+        '美容护理': ['化妆品', '护肤', '美容', '个护'],
+
+        # 金融
+        '券商': ['证券', '券商', '投资'],
+        '银行': ['银行', '商业银行', '农商行'],
+        '保险': ['保险', '人寿', '财险'],
+
+        # 周期/资源细分
+        '贵金属': ['黄金', '白银', '贵金属'],
+        '有色金属': ['铜', '铝', '锌', '铅', '锡', '有色'],
+        '稀土/稀有金属': ['稀土', '钨', '钼', '锂', '镓', '锗'],
+        '煤炭': ['煤炭', '焦煤', '焦炭', '动力煤'],
+        '石油石化': ['石油', '石化', '炼化', '油服', '油气'],
+        '化工': ['化工', '化学', '化纤', '农化', '橡胶'],
+
+        # 基建/地产
+        '房地产': ['地产', '房地产', '物业'],
+        '建筑建材': ['建筑', '建材', '水泥', '玻璃', '钢铁', '装修'],
+        '基建/工程机械': ['基建', '工程', '机械', '挖掘机', '混凝土'],
+
+        # 公用事业
+        '电力': ['电力', '电网', '发电', '供电', '水电', '火电', '核电', '清洁能源'],
+        '环保': ['环保', '水处理', '固废', '垃圾', '污水'],
+
+        # 国防军工
+        '军工/国防': ['军工', '国防', '航空', '航天', '导弹', '雷达', '卫星'],
+
+        # 新兴产业
+        '量子科技': ['量子', '量子计算', '量子通信'],
+        '元宇宙/VR/AR': ['元宇宙', 'VR', 'AR', 'XR', '虚拟现实', '增强现实'],
+        '区块链': ['区块链', '数字货币', '加密'],
+        '卫星互联网': ['卫星', '低轨', '星链', '通信卫星'],
+        '机器人': ['机器人', '工业机器人', '人形机器人', '协作机器人'],
+
+        # 其他传统行业
+        '农林牧渔': ['农业', '种植', '养殖', '饲料', '渔业', '林业', '农产品'],
+        '交运物流': ['交运', '物流', '快递', '航运', '港口', '铁路', '航空'],
+        '旅游酒店': ['旅游', '酒店', '景区', '餐饮'],
+        '商贸零售': ['零售', '商贸', '百货', '超市', '电商'],
     }
 
     stock_name_upper = stock_name.upper()
@@ -2148,7 +2386,7 @@ def analyze_sector_performance(df_zt=None):
 
 @tool
 def get_market_big_picture(days: int = 5) -> str:
-    """获取市场大局观分析（多维度综合分析）
+    """获取市场大局观分析（多维度综合分析，使用并行策略加速）
 
     从以下4个维度分析市场：
     1. 指数表现 - 主要指数（沪深300、创业板指、北证50等）涨跌情况
@@ -2163,17 +2401,74 @@ def get_market_big_picture(days: int = 5) -> str:
     """
     try:
         from datetime import datetime, timedelta
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
 
         result = f"{'='*70}\n"
         result += f"📊 市场大局观分析（{days}日线）\n"
         result += f"{'='*70}\n\n"
 
-        # ========== 1. 指数分析 ==========
+        # ========== 并行获取所有数据 ==========
+        # 定义所有数据获取任务
+        def fetch_index():
+            """获取指数数据"""
+            try:
+                return fetch_index_data(['sh000300', 'sz399006', 'sh000001', 'sz399001'])
+            except Exception as e:
+                print(f"指数数据获取异常: {e}")
+                return None
+
+        def fetch_cycle():
+            """判断指数周期"""
+            try:
+                return judge_index_cycle(days=10)
+            except Exception as e:
+                print(f"周期判断异常: {e}")
+                return None
+
+        def fetch_multi_sentiment():
+            """获取多日情绪"""
+            try:
+                return analyze_multi_day_sentiment(days)
+            except Exception as e:
+                print(f"多日情绪分析异常: {e}")
+                return None
+
+        def fetch_today_sentiment():
+            """获取今日情绪"""
+            try:
+                return _analyze_market_sentiment_impl()
+            except Exception as e:
+                print(f"今日情绪分析异常: {e}")
+                return None
+
+        def fetch_sectors():
+            """获取板块数据"""
+            try:
+                return analyze_sector_performance()
+            except Exception as e:
+                print(f"板块分析异常: {e}")
+                return None
+
+        # 并行执行所有任务
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_index = executor.submit(fetch_index)
+            future_cycle = executor.submit(fetch_cycle)
+            future_multi_sentiment = executor.submit(fetch_multi_sentiment)
+            future_today_sentiment = executor.submit(fetch_today_sentiment)
+            future_sectors = executor.submit(fetch_sectors)
+
+            # 等待所有任务完成
+            df_index = future_index.result()
+            cycle_info = future_cycle.result()
+            sentiment_data = future_multi_sentiment.result()
+            today_sentiment = future_today_sentiment.result()
+            sector_data = future_sectors.result()
+
+        # ========== 1. 指数分析 + 周期判断 ==========
         result += f"【一、指数表现】\n"
         try:
-            df_index = fetch_index_data(['sh000300', 'sz399006', 'sh000001', 'sz399001'])
-            if not df_index.empty:
+            if df_index is not None and not df_index.empty:
                 for _, row in df_index.iterrows():
                     name = row.get('名称', '')
                     pct = row.get('涨跌幅', 0)
@@ -2190,15 +2485,42 @@ def get_market_big_picture(days: int = 5) -> str:
                     result += f"\n  ➡️  指数环境: 震荡整理\n"
                 else:
                     result += f"\n  ⚠️  指数环境: 弱势调整\n"
+
             else:
                 result += f"  暂无指数数据\n"
         except Exception as e:
             result += f"  指数数据获取失败: {str(e)}\n"
         result += "\n"
 
+        # ========== 周期判断（A/B/C/D周期）==========
+        result += f"【指数周期判断（A/B/C/D周期）】\n"
+        try:
+            if cycle_info:
+                result += f"  当前周期: {cycle_info.get('cycle', '未知')}\n"
+                result += f"  周期类型: {cycle_info.get('sub_type', '未知')}\n"
+                result += f"  判断依据: {cycle_info.get('reason', '未知')}\n"
+
+                # 根据周期给出简要说明
+                cycle = cycle_info.get('cycle', '')
+                if 'C周期' in cycle:
+                    result += f"\n  💰 C周期特点: 普涨，大牛市，赚钱效应爆炸\n"
+                elif 'A周期' in cycle and '共振' in cycle:
+                    result += f"\n  🚀 共振A特点: 接力空间高度打开，有主线\n"
+                elif 'A周期' in cycle and '背离' in cycle:
+                    result += f"\n  🔄 背离A特点: 指数下跌但情绪活跃，接力空间高度打开\n"
+                elif 'B周期' in cycle:
+                    result += f"\n  📊 B周期特点: 缩量震荡\n"
+                elif 'D周期' in cycle:
+                    result += f"\n  📉 D周期特点: 单边下跌\n"
+            else:
+                result += f"  周期判断数据不可用\n"
+
+        except Exception as e:
+            result += f"  周期判断失败: {str(e)}\n"
+        result += "\n"
+
         # ========== 2. 中级周期分析 ==========
         result += f"【二、中级周期（{days}天情绪趋势）】\n"
-        sentiment_data = analyze_multi_day_sentiment(days)
 
         if sentiment_data and len(sentiment_data) >= 2:
             # 按日期正序排列
@@ -2234,46 +2556,46 @@ def get_market_big_picture(days: int = 5) -> str:
         # ========== 3. 市场情绪 ==========
         result += f"【三、市场情绪（今日）】\n"
         try:
-            # 获取今日情绪分析
-            today_sentiment = analyze_market_sentiment()
+            if today_sentiment:
+                # 提取关键信息
+                import re
+                zt_match = re.search(r'涨停股:\s*(\d+)只', today_sentiment)
+                dt_match = re.search(r'跌停股:\s*(\d+)只', today_sentiment)
+                max_board_match = re.search(r'最高(\d+)板', today_sentiment)
+                grade_match = re.search(r'综合评级[】\s]*(\S+)', today_sentiment)
+                score_match = re.search(r'得分:\s*([\d.]+)', today_sentiment)
 
-            # 提取关键信息
-            import re
-            zt_match = re.search(r'涨停股:\s*(\d+)只', today_sentiment)
-            dt_match = re.search(r'跌停股:\s*(\d+)只', today_sentiment)
-            max_board_match = re.search(r'最高(\d+)板', today_sentiment)
-            grade_match = re.search(r'综合评级[】\s]*(\S+)', today_sentiment)
-            score_match = re.search(r'得分:\s*([\d.]+)', today_sentiment)
+                if zt_match:
+                    result += f"  涨停/跌停: {zt_match.group(1)}只 / "
+                    if dt_match:
+                        result += f"{dt_match.group(1)}只\n"
+                    else:
+                        result += "未知\n"
 
-            if zt_match:
-                result += f"  涨停/跌停: {zt_match.group(1)}只 / "
-                if dt_match:
-                    result += f"{dt_match.group(1)}只\n"
-                else:
-                    result += "未知\n"
+                if grade_match and score_match:
+                    result += f"  综合评级: {grade_match.group(1)} ({score_match.group(1)}/100)\n"
 
-            if grade_match and score_match:
-                result += f"  综合评级: {grade_match.group(1)} ({score_match.group(1)}/100)\n"
+                if max_board_match:
+                    result += f"  最高连板: {max_board_match.group(1)}板\n"
 
-            if max_board_match:
-                result += f"  最高连板: {max_board_match.group(1)}板\n"
-
-            # 昨日对比
-            yest_match = re.search(r'得分: ([\d.]+) → ([\d.]+)', today_sentiment)
-            if yest_match and len(yest_match.groups()) == 2:
-                yest_score = float(yest_match.group(1))
-                today_score = float(yest_match.group(2))
-                diff = today_score - yest_score
-                if diff > 10:
-                    result += f"  对比昨日: 明显转强 (+{diff:.1f})\n"
-                elif diff > 0:
-                    result += f"  对比昨日: 小幅走强 (+{diff:.1f})\n"
-                elif diff < -10:
-                    result += f"  对比昨日: 明显转弱 ({diff:.1f})\n"
-                elif diff < 0:
-                    result += f"  对比昨日: 小幅走弱 ({diff:.1f})\n"
-                else:
-                    result += f"  对比昨日: 持平\n"
+                # 昨日对比
+                yest_match = re.search(r'得分: ([\d.]+) → ([\d.]+)', today_sentiment)
+                if yest_match and len(yest_match.groups()) == 2:
+                    yest_score = float(yest_match.group(1))
+                    today_score = float(yest_match.group(2))
+                    diff = today_score - yest_score
+                    if diff > 10:
+                        result += f"  对比昨日: 明显转强 (+{diff:.1f})\n"
+                    elif diff > 0:
+                        result += f"  对比昨日: 小幅走强 (+{diff:.1f})\n"
+                    elif diff < -10:
+                        result += f"  对比昨日: 明显转弱 ({diff:.1f})\n"
+                    elif diff < 0:
+                        result += f"  对比昨日: 小幅走弱 ({diff:.1f})\n"
+                    else:
+                        result += f"  对比昨日: 持平\n"
+            else:
+                result += f"  情绪数据不可用\n"
 
         except Exception as e:
             result += f"  情绪分析失败: {str(e)}\n"
@@ -2282,11 +2604,10 @@ def get_market_big_picture(days: int = 5) -> str:
         # ========== 4. 题材板块 ==========
         result += f"【四、热门题材板块】\n"
         try:
-            sector_data = analyze_sector_performance()
-
             if sector_data:
-                # 取前8个板块
-                top_sectors = list(sector_data.keys())[:8]
+                # 过滤掉"其他"，取前8个有效板块
+                filtered_sectors = [s for s in sector_data.keys() if s != '其他']
+                top_sectors = filtered_sectors[:8]
 
                 for sector in top_sectors:
                     count = sector_data[sector]['count']
@@ -2315,7 +2636,7 @@ def get_market_big_picture(days: int = 5) -> str:
 
         # 指数分
         try:
-            if not df_index.empty:
+            if df_index is not None and not df_index.empty:
                 avg_index = df_index['涨跌幅'].mean()
                 if avg_index > 1:
                     score_factors.append(('指数环境', '强'))
@@ -2426,12 +2747,27 @@ def build_chat_agent() -> AgentExecutor:
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "你是A股交易助手。你有知识库工具，必须优先使用。\n\n"
+         "【强制执行规则 - 市场分析必须调用工具】\n"
+         "当用户问题涉及以下内容时，必须先调用 get_market_big_picture 工具：\n"
+         "- 市场分析、市场情绪、市场状况、今日行情\n"
+         "- 大盘走势、涨停情况、连板情况\n"
+         "- 题材板块、热点方向、操作建议、买卖方向\n\n"
+         "【数据展示规则 - 必须遵守】\n"
+         "调用工具后，必须：\n"
+         "1. 直接引用工具返回的具体数据（指数涨幅、涨停数量、得分等）\n"
+         "2. 基于真实数据给出分析和建议\n"
+         "3. 用具体数字支撑你的观点\n"
+         "【禁止行为】\n"
+         "- 不要说\"未提供数据\"、\"数据缺失\"\n"
+         "- 不要说\"涨停股数量较多\"而不说具体数字\n"
+         "- 不要跳过工具调用直接根据常识回答\n"
+         "- 不要说\"未提供指数数据\"\n\n"
          "【回答原则：多日对比+大局观分析】\n"
          "每次回答市场相关问题时，必须从以下4个维度提供分析：\n"
-         "1. 指数 - 沪深300/创业板指/上证指数等表现\n"
-         "2. 中级周期 - 过去3-5天情绪趋势，判断当前周期位置\n"
-         "3. 情绪 - 涨停股数量、梯队完整性、赚钱效应\n"
-         "4. 题材 - 热门板块分布、领涨股情况\n\n"
+         "1. 指数 - 沪深300/创业板指/上证指数等表现（必须用具体数字）\n"
+         "2. 中级周期 - 过去3-5天情绪趋势，判断当前周期位置（必须对比具体得分）\n"
+         "3. 情绪 - 涨停股数量、梯队完整性、赚钱效应（必须引用具体数量）\n"
+         "4. 题材 - 热门板块分布、领涨股情况（必须列出具体板块和数量）\n\n"
          "【必备工具】\n"
          "在回答市场分析类问题前，必须先调用 get_market_big_picture 获取大局观。\n"
          "然后结合 get_market_big_picture 的结果，提供多日维度的综合分析。\n\n"
@@ -2446,7 +2782,7 @@ def build_chat_agent() -> AgentExecutor:
          "- '回撤' / '亏损' / '止损' → 调用search_knowledge\n"
          "- 涉及交易策略、情绪理论、打板战法等问题 → 调用search_knowledge\n\n"
          "【工具】\n"
-         "1. get_market_big_picture - 大局观分析（指数+周期+情绪+题材，多日对比）【优先使用】\n"
+         "1. get_market_big_picture - 大局观分析（指数+周期+情绪+题材，多日对比）【市场分析必须调用】\n"
          "2. search_knowledge - 知识库搜索（策略、理论、战法）\n"
          "3. get_limit_up_stocks - 今日涨停\n"
          "4. get_continuous_limit_up_leaders - 连板梯队\n"
@@ -2457,9 +2793,9 @@ def build_chat_agent() -> AgentExecutor:
          "9. get_stock_history - 个股历史K线\n\n"
          "【回答格式】\n"
          "结构化输出：\n"
-         "1. 一句话总结（基于大局观）\n"
-         "2. 多维度分析（指数+周期+情绪+题材）\n"
-         "3. 对比昨日/前几天的变化\n"
+         "1. 一句话总结（基于大局观数据）\n"
+         "2. 多维度分析（用工具返回的具体数据：指数+周期+情绪+题材）\n"
+         "3. 对比昨日/前几天的变化（用具体数字对比）\n"
          "4. 具体建议（操作方向、仓位控制、风险提示）"),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{input}"),

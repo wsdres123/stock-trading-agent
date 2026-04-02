@@ -16,6 +16,40 @@ from langchain_core.prompts import ChatPromptTemplate
 class TradingLossRAG(EnhancedRAG):
     """专门用于分析交易失败和回撤的RAG系统"""
 
+    def __init__(self, api_key: str, folder_path: str = "./ku"):
+        super().__init__(api_key, folder_path)
+
+        # 文件名关键词映射 - 优先匹配规则
+        self.filename_keyword_map = {
+            "屠龙表 - 短线模式.csv": ["短线模式", "短线", "一波流", "趋势接力", "龙头接力", "纯趋势",
+                                    "新题材同身位", "接力唯一性", "接力打破空间", "龙头低吸",
+                                    "低位反推身位", "龙头补涨", "主线核心", "情绪先锋",
+                                    "辨识度反包", "断板趋势龙", "逻辑趋势龙"],
+            "屠龙表 - 题材周期系统.csv": ["题材周期", "题材", "周期系统"],
+            "屠龙表 - 竞价表.csv": ["竞价", "竞价技巧", "集合竞价"],
+            "屠龙表 - 复盘表.csv": ["复盘", "复盘技巧", "复盘方法"],
+            "屠龙表 - 短线周期系统.csv": ["短线周期", "周期判断"],
+            "屠龙表 - 中级周期系统.csv": ["中级周期"],
+        }
+
+    def match_target_files(self, query: str) -> list:
+        """根据问题匹配目标文件名
+
+        返回匹配的文件名列表，优先级从高到低
+        """
+        matched_files = []
+        query_lower = query.lower()
+
+        # 检查每个文件的关键词
+        for filename, keywords in self.filename_keyword_map.items():
+            for keyword in keywords:
+                if keyword.lower() in query_lower:
+                    matched_files.append(filename)
+                    print(f"  ✅ 文件名匹配: '{keyword}' → {filename}")
+                    break  # 找到一个关键词就够了
+
+        return matched_files
+
     def load_documents(self, max_files: int = None):
         """加载所有文档（并发加载，保持优先级）
 
@@ -165,7 +199,7 @@ class TradingLossRAG(EnhancedRAG):
         loss_keywords = ["回撤", "亏损", "失败", "错误", "大跌", "暴跌", "被套", "止损"]
 
         # 检测是否是短线模式相关问题
-        short_term_keywords = ["短线模式", "短线", "模式", "打板", "低吸", "半路", "接力", "龙头"]
+        short_term_keywords = ["短线模式", "短线", "模式", "打板", "低吸", "半路", "接力", "龙头", "屠龙表"]
 
         is_loss_question = any(keyword in query for keyword in loss_keywords)
         is_short_term_question = any(keyword in query for keyword in short_term_keywords)
@@ -183,23 +217,36 @@ class TradingLossRAG(EnhancedRAG):
             print(f"  🎯 识别为回撤/亏损类问题，使用专门查询扩展")
             return expanded
         elif is_short_term_question:
-            # 针对短线模式问题的专门扩展
+            # 针对短线模式问题的专门扩展 - 直接使用CSV中的关键词
             expanded = [
                 query,  # 原始问题
-                "屠龙表短线模式",
-                "一波流接力模式",
-                "趋势接力主升模式",
-                "纯趋势模式",
-                "短线买卖点",
+                "屠龙表 短线模式",  # CSV文件名
+                "一波流接力",  # 行情种类1
+                "趋势接力 龙头接力 主升",  # 行情种类2
+                "纯趋势",  # 行情种类3
+                "新题材同身位 接力唯一性 接力打破空间",  # 具体模式1
+                "龙头低吸 低位反推身位 龙头补涨",  # 具体模式2
+                "主线核心 情绪先锋 辨识度反包",  # 具体模式3
+                "断板趋势龙 逻辑趋势龙",  # 具体模式4
+                "买点 卖点 仓位 周期",  # 关键字段
             ]
-            print(f"  🎯 识别为短线模式类问题，优先检索屠龙表CSV")
+            print(f"  🎯 识别为短线模式类问题，使用CSV关键词扩展")
             return expanded
         else:
             # 使用原有的扩展方法
             return self.expand_query(query)
 
+
     def retrieve_with_rerank(self, query: str, top_k: int = 5):
-        """重写检索方法，使用专门的查询扩展"""
+        """重写检索方法，使用专门的查询扩展和文件名优先匹配"""
+        # 0. 文件名优先匹配
+        print(f"🔍 正在匹配目标文件...", end='')
+        matched_files = self.match_target_files(query)
+        if matched_files:
+            print(f" ✓ 找到 {len(matched_files)} 个匹配文件")
+        else:
+            print(f" - 无精确匹配，将遍历所有文件")
+
         # 1. 使用专门的查询扩展
         print(f"🔍 正在扩展查询...", end='', flush=True)
         expanded_queries = self.expand_query_for_loss_analysis(query)
@@ -214,6 +261,12 @@ class TradingLossRAG(EnhancedRAG):
                 docs = self.ensemble_retriever.get_relevant_documents(q)
 
                 for doc in docs:
+                    # 文件名过滤：如果有匹配的文件，只保留这些文件的内容
+                    if matched_files:
+                        doc_source = doc.metadata.get('source', '')
+                        if doc_source not in matched_files:
+                            continue  # 跳过不匹配的文件
+
                     content_hash = doc.page_content[:100]
                     if content_hash not in seen_content:
                         seen_content.add(content_hash)
@@ -224,13 +277,13 @@ class TradingLossRAG(EnhancedRAG):
         if not all_docs:
             return []
 
-        print(f"📚 检索到 {len(all_docs)} 个候选文档")
+        print(f"📚 检索到 {len(all_docs)} 个候选文档（{'精确匹配' if matched_files else '全局搜索'}）")
 
         # 3. 重排序（针对短线模式问题，提升CSV文件权重）
         print(f"🎯 正在重排序...", end='', flush=True)
 
         # 检测是否是短线模式相关查询
-        short_term_keywords = ["短线模式", "短线", "模式", "打板", "低吸", "半路", "接力", "龙头"]
+        short_term_keywords = ["短线模式", "短线", "模式", "打板", "低吸", "半路", "接力", "龙头", "一波流"]
         is_short_term_question = any(keyword in query for keyword in short_term_keywords)
 
         reranked = self._rerank_documents_with_priority(query, all_docs, is_short_term_question)
@@ -262,12 +315,18 @@ class TradingLossRAG(EnhancedRAG):
                 # CSV文件加分（如果是短线模式相关问题）
                 source = doc.metadata.get('source', '')
                 if boost_csv and source.endswith('.csv'):
-                    # CSV文件额外加分
-                    score += 2.0
-                    # 如果是"短线模式"CSV，额外加更多分
+                    # CSV文件基础加分
+                    score += 3.0
+
+                    # 如果是"短线模式"CSV，大幅提升权重
                     if '短线模式' in source:
-                        score += 3.0
-                        print(f"\n  ⭐ 提升 {source} 权重")
+                        score += 5.0  # 从3.0提升到5.0，确保最优先
+                        print(f"\n  ⭐⭐⭐ 最高优先级：{source}（分数+8）")
+                    elif '屠龙表' in source:
+                        score += 4.0  # 其他屠龙表CSV也提升权重
+                        print(f"\n  ⭐⭐ 高优先级：{source}（分数+7）")
+                    else:
+                        print(f"\n  ⭐ 提升CSV权重：{source}（分数+3）")
 
                 # 优先级文档加分
                 priority = doc.metadata.get('priority', 100)
@@ -299,45 +358,78 @@ class TradingLossRAG(EnhancedRAG):
         print("🔍 正在检索短线模式知识（优先屠龙表CSV）...")
         knowledge = self.retrieve(query, top_k=6, use_rerank=True)
 
+        # 【关键优化】如果是"介绍短线模式"这类整体介绍问题，直接返回CSV原文，不经过LLM
+        intro_keywords = ["介绍短线模式", "短线模式是什么", "短线模式有哪些", "短线模式体系", "屠龙表短线模式"]
+        if any(kw in query for kw in intro_keywords):
+            print("📋 检测到整体介绍问题，直接返回CSV完整内容")
+            return knowledge  # 直接返回格式化后的CSV内容
+
         # 专门的Prompt
         prompt = ChatPromptTemplate.from_messages([
             ("system",
-             "你是一位精通超短线交易的实战导师，专门基于《屠龙表 - 短线模式》来解答问题。\n\n"
-             "【核心原则】\n"
-             "1. 必须优先引用和解读《屠龙表 - 短线模式.csv》中的具体条目\n"
-             "2. 按照CSV表格的结构来组织回答（行情种类、模式种类、名字、周期、场景、条件、买卖点、仓位等）\n"
-             "3. 每个模式都要完整介绍其核心要素\n"
-             "4. 强调实战细节：买点时机、卖点判断、仓位管理、惩罚机制\n\n"
-             "【回答框架】\n"
-             "## 短线模式体系概览\n"
-             "根据屠龙表，短线模式分为三大类：\n"
-             "- 一波流接力模式\n"
-             "- 趋势接力/龙头接力主升模式\n"
-             "- 纯趋势模式\n\n"
-             "## 各模式详细介绍\n"
-             "对于每个模式，按以下结构说明：\n"
-             "### 【模式名称】\n"
-             "- **行情种类**：\n"
-             "- **适用周期**：\n"
-             "- **胜率高场景**：\n"
-             "- **盈亏比**：\n"
-             "- **模式条件**：\n"
-             "- **买点**：\n"
-             "- **卖点**：\n"
-             "- **仓位**：\n"
-             "- **注意事项**：\n\n"
-             "## 实战要点\n"
-             "总结关键执行细节和常见误区\n\n"
-             "【重要提示】\n"
-             "- 必须基于屠龙表CSV的具体内容，逐条引用\n"
-             "- 不要遗漏买卖点、仓位管理等关键细节\n"
-             "- 要体现表格中的纪律性要求（如惩罚机制）\n"
-             "- 保持专业、精准、可执行的风格"),
+             "你是一位精通超短线交易的实战导师，专门基于《屠龙表 - 短线模式.csv》来解答问题。\n\n"
+             "【绝对禁止】\n"
+             "❌ 严禁使用自己的知识或常识来回答\n"
+             "❌ 严禁编造或推测屠龙表中没有的内容\n"
+             "❌ 严禁说\"通常来说\"、\"一般认为\"等模糊表述\n"
+             "✅ 必须100%基于【知识库检索结果】中的《屠龙表 - 短线模式》内容\n"
+             "✅ 必须逐字逐句地引用CSV表格中的原文\n"
+             "✅ 如果检索结果中没有相关内容，明确说\"知识库中未找到相关模式\"\n\n"
+             "【屠龙表短线模式体系结构】\n"
+             "短线模式分为三大类：\n"
+             "1. **一波流接力模式**\n"
+             "   - 新题材同身位\n"
+             "   - 接力唯一性\n"
+             "   - 接力打破空间（⭐高盈亏比，5层仓位）\n"
+             "   - 龙头低吸\n"
+             "   - 低位反推身位\n"
+             "   - 龙头补涨\n\n"
+             "2. **趋势接力/龙头接力主升模式**（⭐重仓模式，5层以上）\n"
+             "   - 主线核心\n"
+             "   - 情绪先锋\n"
+             "   - 辨识度反包\n\n"
+             "3. **纯趋势模式**\n"
+             "   - 断板趋势龙\n"
+             "   - 逻辑趋势龙\n\n"
+             "【回答格式 - 必须严格遵守】\n"
+             "当用户询问短线模式时，必须按以下结构回答：\n\n"
+             "## 📋 屠龙表短线模式体系\n\n"
+             "### 【行情种类分类】\n"
+             "一波流/趋势接力/纯趋势\n\n"
+             "### 【具体模式详解】\n"
+             "对于每个模式，必须包含以下字段（直接引用CSV原文）：\n"
+             "#### 模式X：【模式名称】\n"
+             "- **行情种类**：（从CSV中提取）\n"
+             "- **模式种类**：（从CSV中提取）\n"
+             "- **适用周期**：（从CSV \"可做周期\" 列提取）\n"
+             "- **胜率高场景**：（从CSV \"模式胜率高场景\" 列提取）\n"
+             "- **盈亏比**：（从CSV中提取，如果是\"高\"则标注⭐）\n"
+             "- **模式条件**：（从CSV \"模式条件\" 列完整引用）\n"
+             "- **买点**：（从CSV \"买点\" 列完整引用）\n"
+             "- **卖点**：（从CSV \"卖点\" 列完整引用）\n"
+             "- **仓位**：（从CSV \"仓位\" 列提取，3层以下为轻仓，5层以上为重仓）\n"
+             "- **纪律要求**：（仅当CSV \"惩罚机制及心态管理\" 列有内容时才显示，否则完全跳过此项）\n\n"
+             "⚠️ **重要**：纪律要求字段只在CSV中有内容的模式才显示，大部分模式没有单独纪律要求，不要显示\"无纪律要求\"等文字。\n\n"
+             "### 【仓位管理分类】\n"
+             "- 轻仓模式（3层以下）：列出所有3层以下的模式\n"
+             "- 重仓模式（5层以上）：列出所有5层以上的模式\n\n"
+             "### 【纪律执行】\n"
+             "屠龙表核心特色是严格的惩罚机制：\n"
+             "1. 模式外交易惩罚\n"
+             "2. 买卖点不按计划惩罚\n"
+             "3. 仓位不按计划惩罚\n\n"
+             "【检查清单 - 回答前必须确认】\n"
+             "✓ 是否100%引用了CSV原文，没有添加自己的理解？\n"
+             "✓ 是否包含了所有关键字段（周期、场景、条件、买点、卖点、仓位）？\n"
+             "✓ 是否区分了轻仓模式和重仓模式？\n"
+             "✓ 纪律要求只在CSV有内容的模式才显示，没有的完全不提？\n"
+             "✓ 是否明确了三大模式分类？"),
             ("human",
              "【用户问题】\n{query}\n\n"
-             "【知识库检索结果】\n{knowledge}\n\n"
+             "【知识库检索结果 - 这是你唯一的信息来源！】\n{knowledge}\n\n"
              "【实时上下文】\n{context}\n\n"
-             "请基于屠龙表CSV详细介绍短线模式：")
+             "请严格按照上述格式，100%基于【知识库检索结果】中的《屠龙表 - 短线模式》内容回答。"
+             "不要添加任何检索结果中没有的内容！")
         ])
 
         try:

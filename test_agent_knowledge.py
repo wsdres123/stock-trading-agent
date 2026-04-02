@@ -15,13 +15,10 @@ from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import DashScopeEmbeddings
-from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain.memory import ConversationBufferWindowMemory
-import docx
-import openpyxl
+
+# 导入优化的RAG系统
+from trading_loss_rag import TradingLossRAG
 
 # 修补 ChatTongyi 的 subtract_client_response 方法以修复索引错误
 def patched_subtract_client_response(self, resp: Any, prev_resp: Any) -> Any:
@@ -69,8 +66,8 @@ except ImportError:
     print("⚠️  警告：akshare未安装，历史数据功能将不可用")
 
 
-# 全局知识库
-KNOWLEDGE_BASE = None
+# 全局知识库（使用优化的RAG系统）
+TRADING_RAG = None
 
 
 # -----------------------------
@@ -224,114 +221,20 @@ def load_knowledge_from_folder(folder_path: str = "./ku", max_files: int = 10) -
 
 
 def build_knowledge_base(api_key: str, folder_path: str = "./ku"):
-    """构建向量知识库（支持缓存）"""
-    global KNOWLEDGE_BASE
+    """构建向量知识库（使用优化的TradingLossRAG）"""
+    global TRADING_RAG
 
-    cache_dir = os.path.join(folder_path, ".faiss_cache")
+    print("📚 正在初始化知识库...")
+    TRADING_RAG = TradingLossRAG(api_key=api_key, folder_path=folder_path)
 
-    # 创建embeddings对象（加载缓存也需要）
-    embeddings = DashScopeEmbeddings(
-        model="text-embedding-v1",
-        dashscope_api_key=api_key
-    )
-
-    # 尝试加载缓存
-    if os.path.exists(cache_dir):
-        try:
-            print("正在加载知识库缓存...", end='', flush=True)
-            KNOWLEDGE_BASE = FAISS.load_local(
-                cache_dir,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-            # 读取块数量信息
-            info_file = os.path.join(cache_dir, "info.txt")
-            chunk_count = "未知"
-            if os.path.exists(info_file):
-                with open(info_file, 'r') as f:
-                    chunk_count = f.read().strip()
-            print(f" ✓ ({chunk_count}个文本块)")
-            return KNOWLEDGE_BASE
-        except Exception as e:
-            # 缓存损坏，删除重建
-            import shutil
-            shutil.rmtree(cache_dir, ignore_errors=True)
-
-    # 加载文档
-    docs = load_knowledge_from_folder(folder_path)
-    if not docs:
-        print("⚠️  没有加载到知识文件，知识库功能将不可用")
+    if not TRADING_RAG.build_enhanced_index():
+        print("❌ 知识库初始化失败")
+        TRADING_RAG = None
         return None
 
-    # 切分文档（优化参数以减少文本块数量）
-    print("正在切分文档...", end='', flush=True)
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,  # 增加块大小，减少总块数
-        chunk_overlap=100,
-        separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
-    )
+    print("✅ 知识库初始化完成！")
+    return TRADING_RAG
 
-    all_texts = []
-    all_metadatas = []
-
-    for doc in docs:
-        chunks = text_splitter.split_text(doc["content"])
-        all_texts.extend(chunks)
-        all_metadatas.extend([{"source": doc["source"]} for _ in chunks])
-
-    print(f" ✓ ({len(all_texts)}个文本块)")
-
-    # 创建向量数据库（这一步最慢，因为要调用API生成embeddings）
-    print(f"正在生成向量索引（{len(all_texts)}个文本块）...", flush=True)
-    try:
-        # 分批处理，显示进度
-        batch_size = 100
-        if len(all_texts) > 500:
-            print(f"提示：文本块较多，预计需要60-120秒，请耐心等待...", flush=True)
-            KNOWLEDGE_BASE = None
-            total_batches = (len(all_texts) + batch_size - 1) // batch_size
-            for i in range(0, len(all_texts), batch_size):
-                batch_num = i // batch_size + 1
-                print(f"  进度: {batch_num}/{total_batches} 批次...", end='\r', flush=True)
-                batch_texts = all_texts[i:i+batch_size]
-                batch_metas = all_metadatas[i:i+batch_size]
-                if KNOWLEDGE_BASE is None:
-                    KNOWLEDGE_BASE = FAISS.from_texts(batch_texts, embeddings, batch_metas)
-                else:
-                    temp_db = FAISS.from_texts(batch_texts, embeddings, batch_metas)
-                    KNOWLEDGE_BASE.merge_from(temp_db)
-            print(f"  进度: {total_batches}/{total_batches} 批次 ✓ 完成          ")
-        else:
-            # 文本块少，直接一次性生成
-            KNOWLEDGE_BASE = FAISS.from_texts(
-                texts=all_texts,
-                embedding=embeddings,
-                metadatas=all_metadatas
-            )
-            print(" ✓")
-    except Exception as e:
-        print(f"\n❌ 向量索引生成失败: {str(e)}")
-        print("建议检查网络连接或API密钥是否正确")
-        return None
-
-    # 保存缓存
-    try:
-        KNOWLEDGE_BASE.save_local(cache_dir)
-        # 保存块数量信息
-        info_file = os.path.join(cache_dir, "info.txt")
-        with open(info_file, 'w') as f:
-            f.write(str(len(all_texts)))
-    except Exception:
-        pass  # 缓存保存失败不影响使用
-
-    return KNOWLEDGE_BASE
-
-
-# -----------------------------
-# 数据获取函数（使用新浪财经API + 东方财富）
-# -----------------------------
-# 缓存连板天数，避免重复计算
-_BOARD_DAYS_CACHE = {}
 
 def get_limit_up_data_by_date(date_str: str) -> set:
     """获取指定日期的涨停股代码集合
@@ -1034,55 +937,19 @@ def search_knowledge(query: str, top_k: int = 15) -> str:
 
     参数：
     - query: 搜索查询，如"如何判断情绪周期"、"打板战法"、"龙头股选择"
-    - top_k: 返回最相关的前几条结果，默认15
+    - top_k: 返回最相关的前几条结果，默认15（内部优化，自动匹配文件）
 
     返回：相关知识的文本内容
     """
-    global KNOWLEDGE_BASE
+    global TRADING_RAG
 
-    if KNOWLEDGE_BASE is None:
+    if TRADING_RAG is None:
         return "知识库未初始化，无法搜索"
 
     try:
-        # 使用MMR搜索以增加结果多样性，避免都是同一个文件
-        docs = KNOWLEDGE_BASE.max_marginal_relevance_search(
-            query,
-            k=top_k,
-            fetch_k=50,  # 先获取50个候选，再筛选多样性最高的15个
-            lambda_mult=0.5  # 平衡相关性和多样性
-        )
-
-        results = []
-        seen_content = set()
-        seen_sources = {}  # 记录每个来源文件出现的次数
-
-        for i, doc in enumerate(docs, 1):
-            source = doc.metadata.get('source', '未知')
-            content = doc.page_content.strip()
-
-            # 去重：避免返回重复内容
-            content_hash = hash(content[:100])
-            if content_hash in seen_content:
-                continue
-            seen_content.add(content_hash)
-
-            # 限制单个文件最多出现2次（避免被屠龙表占据）
-            if source not in seen_sources:
-                seen_sources[source] = 0
-            if seen_sources[source] >= 2 and '屠龙表' in source:
-                continue  # 屠龙表最多2条
-            seen_sources[source] += 1
-
-            # txt文件优先（经验总结更精炼）
-            priority = 0 if '.txt' in source else 1
-            results.append((priority, f"【来源: {source}】\n{content}\n"))
-
-            if len(results) >= 5:  # 最多返回5条
-                break
-
-        # 按优先级排序
-        results.sort(key=lambda x: x[0])
-        return "\n---\n".join([r[1] for r in results])
+        # 使用优化的RAG系统，自动文件名匹配 + 增强Prompt
+        result = TRADING_RAG.search_with_reasoning(query)
+        return result
     except Exception as e:
         return f"搜索失败: {str(e)}"
 
@@ -2746,7 +2613,38 @@ def build_chat_agent() -> AgentExecutor:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "你是A股交易助手。你有知识库工具，必须优先使用。\n\n"
+         "你是A股交易助手。\n\n"
+         "【🚨 绝对禁止幻觉 - 最高优先级规则】\n"
+         "❌ 严禁使用自己的知识或常识回答交易相关问题\n"
+         "❌ 严禁编造知识库中不存在的内容\n"
+         "❌ 严禁说\"通常来说\"、\"一般认为\"、\"我认为\"、\"适合人群\"等模糊表述\n"
+         "❌ 严禁添加CSV中不存在的字段或内容\n"
+         "✅ 遇到交易策略/模式/技巧问题，必须先调用 search_knowledge 工具\n"
+         "✅ 必须100%基于工具返回的内容回答，逐字逐句引用原文\n"
+         "✅ 必须明确引用来源（如\"根据《屠龙表 - 短线模式.csv》...\"）\n"
+         "✅ CSV中的所有字段都必须完整展示，不能遗漏\n\n"
+         "【知识库优先原则 - 必须遵守！】\n"
+         "当用户问题包含以下任一关键词时，第一步操作必须是调用 search_knowledge 工具：\n\n"
+         "**模式相关**（必须调用！）：\n"
+         "- \"短线模式\"、\"短线\"、\"模式\"、\"屠龙表\"\n"
+         "- \"一波流\"、\"趋势接力\"、\"龙头接力\"、\"纯趋势\"\n"
+         "- \"新题材同身位\"、\"接力唯一性\"、\"接力打破空间\"\n"
+         "- \"龙头低吸\"、\"低位反推身位\"、\"龙头补涨\"\n"
+         "- \"主线核心\"、\"情绪先锋\"、\"辨识度反包\"\n"
+         "- \"断板趋势龙\"、\"逻辑趋势龙\"\n\n"
+         "**交易手法**（必须调用！）：\n"
+         "- \"超短\"、\"打板\"、\"低吸\"、\"半路\"、\"接力\"\n"
+         "- \"龙头\"、\"龙头股\"、\"空间龙\"、\"补涨龙\"\n\n"
+         "**情绪周期**（必须调用！）：\n"
+         "- \"情绪周期\"、\"情绪流\"、\"市场情绪\"\n"
+         "- \"竞价\"、\"选时\"、\"预期差\"\n\n"
+         "**风控纪律**（必须调用！）：\n"
+         "- \"交易战法\"、\"手法\"、\"策略\"\n"
+         "- \"错题集\"、\"风控\"、\"卖点\"、\"买点\"\n"
+         "- \"仓位\"、\"止损\"、\"纪律\"、\"惩罚\"\n\n"
+         "**题材周期**（必须调用！）：\n"
+         "- \"题材周期\"、\"周期系统\"、\"可做周期\"\n"
+         "- \"混沌\"、\"主升\"、\"强修复\"、\"弱修复\"\n\n"
          "【强制执行规则 - 市场分析必须调用工具】\n"
          "当用户问题涉及以下内容时，必须先调用 get_market_big_picture 工具：\n"
          "- 市场分析、市场情绪、市场状况、今日行情\n"
@@ -2768,22 +2666,20 @@ def build_chat_agent() -> AgentExecutor:
          "2. 中级周期 - 过去3-5天情绪趋势，判断当前周期位置（必须对比具体得分）\n"
          "3. 情绪 - 涨停股数量、梯队完整性、赚钱效应（必须引用具体数量）\n"
          "4. 题材 - 热门板块分布、领涨股情况（必须列出具体板块和数量）\n\n"
-         "【必备工具】\n"
-         "在回答市场分析类问题前，必须先调用 get_market_big_picture 获取大局观。\n"
-         "然后结合 get_market_big_picture 的结果，提供多日维度的综合分析。\n\n"
-         "【必须遵守 - 知识库】\n"
-         "用户问题中包含以下关键词时，第一步必须调用search_knowledge：\n"
-         "- '为什么' / '为何' → 调用search_knowledge\n"
-         "- '如何' → 调用search_knowledge\n"
-         "- '什么是' → 调用search_knowledge\n"
-         "- '怎么' → 调用search_knowledge\n"
-         "- '态度' → 调用search_knowledge\n"
-         "- '原则' / '方法' / '技巧' → 调用search_knowledge\n"
-         "- '回撤' / '亏损' / '止损' → 调用search_knowledge\n"
-         "- 涉及交易策略、情绪理论、打板战法等问题 → 调用search_knowledge\n\n"
+         "【知识库回答要求 - CSV格式】\n"
+         "当回答来自CSV文件（如屠龙表短线模式）时：\n"
+         "1. 必须保留CSV中的所有字段，包括：\n"
+         "   - 行情种类、模式种类、名字\n"
+         "   - 可做周期（混沌/主升/强修复/弱修复）← 这个非常重要！\n"
+         "   - 胜率高场景、盈亏比\n"
+         "   - 模式条件、买点、卖点\n"
+         "   - 仓位、纪律要求/惩罚机制\n"
+         "2. 必须按CSV原文逐字引用，不要改写或总结\n"
+         "3. 必须用表格或结构化格式清晰展示\n"
+         "4. 严禁添加CSV中不存在的内容（如\"适合人群\"）\n\n"
          "【工具】\n"
          "1. get_market_big_picture - 大局观分析（指数+周期+情绪+题材，多日对比）【市场分析必须调用】\n"
-         "2. search_knowledge - 知识库搜索（策略、理论、战法）\n"
+         "2. search_knowledge - 知识库搜索（策略、理论、战法）【交易策略问题必须调用】\n"
          "3. get_limit_up_stocks - 今日涨停\n"
          "4. get_continuous_limit_up_leaders - 连板梯队\n"
          "5. analyze_market_sentiment - 市场情绪\n"

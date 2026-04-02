@@ -188,7 +188,7 @@ class EnhancedRAG:
             return "", Path(file_path).stem
 
     def _read_csv_file(self, file_path: str) -> Tuple[str, str]:
-        """读取CSV文件并转换为结构化文本
+        """读取CSV文件并转换为结构化文本（针对屠龙表优化）
 
         返回：(内容, 标题)
         """
@@ -204,33 +204,106 @@ class EnhancedRAG:
                 return "", Path(file_path).stem
 
             title = Path(file_path).stem
-            content_parts = [f"# {title}\n"]
 
-            # 将DataFrame转换为易读的文本格式
-            # 每一行转换为一个结构化的段落
-            for idx, row in df.iterrows():
-                row_text_parts = []
-                for col_name, value in row.items():
-                    if pd.notna(value) and str(value).strip():
-                        row_text_parts.append(f"{col_name}: {value}")
-
-                if row_text_parts:
-                    # 每一行数据作为一个段落
-                    content_parts.append("## 模式条目 " + str(idx + 1))
-                    content_parts.append("\n".join(row_text_parts))
-                    content_parts.append("")  # 空行分隔
-
-            content = "\n".join(content_parts)
-
-            # 如果内容太短，尝试另一种格式（表格形式）
-            if len(content) < 100:
-                content = f"# {title}\n\n{df.to_string(index=False)}"
+            # 特殊处理：屠龙表 - 短线模式
+            if "短线模式" in title:
+                content = self._format_short_term_mode_csv(df, title)
+            else:
+                # 默认格式
+                content = self._format_generic_csv(df, title)
 
             return content, title
 
         except Exception as e:
             print(f"\n⚠️  CSV读取失败 {file_path}: {e}")
             return "", Path(file_path).stem
+
+    def _format_short_term_mode_csv(self, df: pd.DataFrame, title: str) -> str:
+        """专门格式化短线模式CSV，保持表格结构"""
+        content_parts = [
+            f"# {title}",
+            "",
+            "## 短线模式体系结构",
+            "本表格包含三大类短线模式：",
+            "1. 一波流接力模式",
+            "2. 趋势接力/龙头接力主升模式",
+            "3. 纯趋势模式",
+            "",
+        ]
+
+        # 按行情种类分组
+        current_category = None
+
+        for idx, row in df.iterrows():
+            # 提取关键字段
+            category = str(row.get('行情种类', '')).strip()
+            mode_type = str(row.get('模式种类', '')).strip()
+            name = str(row.get('名字', '')).strip()
+
+            if not name or name == 'nan':
+                continue
+
+            # 检测新分类
+            if category and category != 'nan' and category != current_category:
+                current_category = category
+                content_parts.append(f"\n## 【{current_category}】")
+                content_parts.append("")
+
+            # 模式标题
+            content_parts.append(f"### 模式：{name}")
+
+            # 关键信息
+            fields_to_extract = [
+                ('模式种类', '类型'),
+                ('可做周期', '适用周期'),
+                ('模式胜率高场景', '胜率高场景'),
+                ('盈亏比', '盈亏比'),
+                ('模式条件', '模式条件'),
+                ('买点', '买点'),
+                ('卖点', '卖点'),
+                ('仓位', '仓位'),
+                ('惩罚机制及心态管理', '纪律要求'),
+            ]
+
+            for col, label in fields_to_extract:
+                value = str(row.get(col, '')).strip()
+                # 完全跳过空值，不显示任何文字
+                if value and value != 'nan' and len(value) > 0:
+                    # 多行内容处理
+                    if '\n' in value:
+                        content_parts.append(f"**{label}**：")
+                        for line in value.split('\n'):
+                            if line.strip():
+                                content_parts.append(f"  - {line.strip()}")
+                    else:
+                        content_parts.append(f"**{label}**：{value}")
+
+            content_parts.append("")  # 空行分隔
+
+        return "\n".join(content_parts)
+
+    def _format_generic_csv(self, df: pd.DataFrame, title: str) -> str:
+        """通用CSV格式化方法"""
+        content_parts = [f"# {title}\n"]
+
+        for idx, row in df.iterrows():
+            row_text_parts = []
+            for col_name, value in row.items():
+                if pd.notna(value) and str(value).strip():
+                    row_text_parts.append(f"**{col_name}**: {value}")
+
+            if row_text_parts:
+                content_parts.append(f"## 条目 {idx + 1}")
+                content_parts.append("\n".join(row_text_parts))
+                content_parts.append("")
+
+        content = "\n".join(content_parts)
+
+        # 如果内容太短，使用表格形式
+        if len(content) < 100:
+            content = f"# {title}\n\n{df.to_string(index=False)}"
+
+        return content
 
     def build_enhanced_index(self):
         """构建增强版索引
@@ -271,40 +344,49 @@ class EnhancedRAG:
 
         print(f" ✓ 生成 {len(split_docs)} 个文本块")
 
-        # 1. 构建向量索引
+        # 1. 构建向量索引（可选，失败时降级到纯BM25）
         print("🔍 正在构建向量索引...", end='', flush=True)
-        embeddings = DashScopeEmbeddings(
-            model="text-embedding-v1",
-            dashscope_api_key=self.api_key
-        )
-
+        vector_retriever = None
         try:
+            embeddings = DashScopeEmbeddings(
+                model="text-embedding-v1",
+                dashscope_api_key=self.api_key
+            )
             self.vector_store = FAISS.from_documents(
                 documents=split_docs,
                 embedding=embeddings
             )
+            vector_retriever = self.vector_store.as_retriever(
+                search_kwargs={"k": 4}
+            )
             print(" ✓")
         except Exception as e:
-            print(f"\n❌ 向量索引构建失败: {e}")
+            print(f"\n⚠️  向量索引构建失败: {e}")
+            print("   将降级使用BM25关键词检索")
+
+        # 2. 构建BM25关键词索引（必须成功）
+        print("🔍 正在构建BM25索引...", end='', flush=True)
+        try:
+            self.bm25_retriever = BM25Retriever.from_documents(split_docs)
+            self.bm25_retriever.k = 8  # 增加返回结果数
+            print(" ✓")
+        except Exception as e:
+            print(f"\n❌ BM25索引构建失败: {e}")
             return False
 
-        # 2. 构建BM25关键词索引
-        print("🔍 正在构建BM25索引...", end='', flush=True)
-        self.bm25_retriever = BM25Retriever.from_documents(split_docs)
-        self.bm25_retriever.k = 4  # BM25返回4个结果
-        print(" ✓")
-
-        # 3. 组合混合检索器（向量 + BM25）
-        print("🔍 正在构建混合检索器...", end='', flush=True)
-        vector_retriever = self.vector_store.as_retriever(
-            search_kwargs={"k": 4}  # 向量检索返回4个结果
-        )
-
-        self.ensemble_retriever = EnsembleRetriever(
-            retrievers=[vector_retriever, self.bm25_retriever],
-            weights=[0.6, 0.4]  # 向量检索权重60%，BM25权重40%
-        )
-        print(" ✓")
+        # 3. 组合混合检索器
+        print("🔍 正在构建检索器...", end='', flush=True)
+        if vector_retriever:
+            # 向量+BM25混合检索
+            self.ensemble_retriever = EnsembleRetriever(
+                retrievers=[vector_retriever, self.bm25_retriever],
+                weights=[0.6, 0.4]
+            )
+            print(" ✓ (混合检索)")
+        else:
+            # 仅BM25检索
+            self.ensemble_retriever = self.bm25_retriever
+            print(" ✓ (BM25检索)")
 
         print("✅ 增强版RAG系统初始化完成！")
         return True

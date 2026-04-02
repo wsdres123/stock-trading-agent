@@ -208,6 +208,12 @@ class EnhancedRAG:
             # 特殊处理：屠龙表 - 短线模式
             if "短线模式" in title:
                 content = self._format_short_term_mode_csv(df, title)
+            # 特殊处理：屠龙表 - 题材周期系统
+            elif "题材周期系统" in title:
+                content = self._format_theme_cycle_csv(df, title)
+            # 特殊处理：屠龙表 - 竞价表
+            elif "竞价表" in title:
+                content = self._format_bidding_table_csv(df, title)
             else:
                 # 默认格式
                 content = self._format_generic_csv(df, title)
@@ -279,6 +285,116 @@ class EnhancedRAG:
                         content_parts.append(f"**{label}**：{value}")
 
             content_parts.append("")  # 空行分隔
+
+        return "\n".join(content_parts)
+
+    def _format_bidding_table_csv(self, df: pd.DataFrame, title: str) -> str:
+        """专门格式化竞价表CSV（时间序列记录）- 简洁版"""
+        content_parts = [
+            f"# {title}",
+            "",
+            "竞价表是每日市场情绪的记录表，记录关键指标用于判断市场状态。",
+            "",
+        ]
+
+        # 过滤掉空行和无效数据
+        df_valid = df[df['日期'].notna()].copy()
+
+        if len(df_valid) == 0:
+            return "\n".join(content_parts)
+
+        # 按日期排序（降序，最新的在前）
+        try:
+            df_valid['日期'] = pd.to_datetime(df_valid['日期'], errors='coerce')
+            df_valid = df_valid.sort_values('日期', ascending=False)
+        except:
+            pass
+
+        # 显示最近30天的数据
+        recent_days = min(30, len(df_valid))
+        df_recent = df_valid.head(recent_days)
+
+        content_parts.append(f"最近{recent_days}天数据：")
+        content_parts.append("")
+
+        # 关键字段列表
+        key_columns = ['节点', '高位', '中位', '小票亏效', '大票亏效', '一字', '断板', '是否开仓']
+
+        # 简洁格式：每天一行，所有字段横排
+        for _, row in df_recent.iterrows():
+            date_str = str(row.get('日期', ''))[:10]
+            if not date_str or date_str == 'NaT':
+                continue
+
+            # 收集该日期的所有字段值
+            fields = []
+            for col in key_columns:
+                value = str(row.get(col, '')).strip()
+                if value and value != 'nan' and value != '':
+                    fields.append(f"{col}={value}")
+
+            # 一行展示
+            if fields:
+                content_parts.append(f"[{date_str}] " + " | ".join(fields))
+
+        content_parts.append("")
+        return "\n".join(content_parts)
+
+    def _format_theme_cycle_csv(self, df: pd.DataFrame, title: str) -> str:
+        """专门格式化题材周期系统CSV"""
+        content_parts = [
+            f"# {title}",
+            "",
+            "## 题材周期系统说明",
+            "题材在市场中经历不同的生命周期阶段，每个阶段有不同的表现特征和操作机会。",
+            "",
+        ]
+
+        # 获取列名（题材节点）
+        # 第一行是：可参与题材, 题材节点, 发酵, 强更强, 首次分歧, 弱转强, 高潮, 2次分歧加入轮动
+        # 跳过第一列"可参与题材"
+        if len(df) == 0:
+            return "\n".join(content_parts)
+
+        # 提取题材节点（列名）
+        col_names = df.columns.tolist()
+        # col_names[0] 是 "可参与题材"，col_names[1:] 是各个阶段
+        stages = []
+        for i in range(1, len(col_names)):
+            col_name = col_names[i]
+            # 从第一行（题材节点行）获取阶段名称
+            if len(df) > 0:
+                stage_name = str(df.iloc[0, i]).strip()
+                if stage_name and stage_name != 'nan':
+                    stages.append((i, stage_name))
+
+        # 如果没有找到阶段，使用列索引
+        if not stages:
+            stages = [(i, col_names[i]) for i in range(1, len(col_names))]
+
+        # 按阶段格式化
+        for col_idx, stage_name in stages:
+            content_parts.append(f"### 【{stage_name}】")
+            content_parts.append("")
+
+            # 遍历每一行（维度）
+            for row_idx in range(1, len(df)):  # 跳过第0行（题材节点行）
+                dimension_name = str(df.iloc[row_idx, 0]).strip()  # 第一列是维度名
+                if not dimension_name or dimension_name == 'nan':
+                    continue
+
+                value = str(df.iloc[row_idx, col_idx]).strip()
+                if value and value != 'nan' and value != '无':
+                    # 多行内容处理
+                    if '\n' in value:
+                        content_parts.append(f"**{dimension_name}**：")
+                        for line in value.split('\n'):
+                            if line.strip():
+                                content_parts.append(f"  - {line.strip()}")
+                    else:
+                        content_parts.append(f"**{dimension_name}**：{value}")
+
+            content_parts.append("")  # 阶段间空行
 
         return "\n".join(content_parts)
 

@@ -500,11 +500,31 @@ class TradingLossRAG(EnhancedRAG):
             return f"分析失败: {str(e)}"
 
     def search_with_reasoning(self, query: str, context: str = "") -> str:
-        """通用知识检索和推理回答方法
+        """通用知识检索和推理回答方法"""
 
-        这是agent_ui.py调用的主要方法，用于回答所有基于知识库的问题
-        """
-        # 检测问题类型，使用专门的处理方法
+        # 【核心优化】检测文件名匹配 → 如果匹配到CSV文件，直接返回完整内容
+        matched_files = self.match_target_files(query)
+        if matched_files:
+            # 只要匹配到了CSV文件（如竞价表、短线模式等），就直接返回完整内容
+            csv_files = [f for f in matched_files if f.endswith('.csv')]
+            if csv_files:
+                print(f"📋 匹配到CSV文件: {csv_files[0]}，直接返回完整内容")
+                # 获取完整文档
+                target_docs = [doc for doc in self.documents if doc.metadata.get('source') == csv_files[0]]
+                if target_docs:
+                    return target_docs[0].page_content
+
+        # 检测"介绍XXX"类问题（作为备用）
+        intro_pattern_keywords = ["介绍", "是什么", "有哪些", "什么是"]
+        is_intro_question = any(kw in query for kw in intro_pattern_keywords)
+
+        if is_intro_question and matched_files:
+            print(f"📋 检测到介绍类问题 + 匹配到文件: {matched_files[0]}")
+            target_docs = [doc for doc in self.documents if doc.metadata.get('source') == matched_files[0]]
+            if target_docs:
+                return target_docs[0].page_content
+
+        # 原有的分类逻辑（保留作为后备）
         loss_keywords = ["回撤", "亏损", "失败", "错误", "大跌", "暴跌", "被套", "止损"]
         short_term_keywords = ["短线模式", "短线", "模式", "打板", "低吸", "半路", "接力", "龙头"]
 

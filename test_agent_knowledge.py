@@ -294,7 +294,7 @@ def calculate_continuous_limit_up_days_from_history(symbol: str) -> int:
 
         # 收集所有可用的交易日文件
         available_dates = []
-        for i in range(10):  # 检查最近10天
+        for i in range(20):  # 检查最近20天（含节假日需要更大范围）
             date_obj = today - timedelta(days=i)
             if date_obj.weekday() >= 5:  # 跳过周末
                 continue
@@ -776,15 +776,17 @@ def analyze_continuous_limit_up():
         today = datetime.now().strftime('%Y%m%d')
         cache_file = f'./data/limit_up_history/{today}_board_cache.json'
 
-        # 如果缓存存在且不超过30分钟，直接使用缓存
+        # 如果缓存存在且不超过24小时，直接使用缓存（优先使用缓存，避免重新计算bug）
         if os.path.exists(cache_file):
             try:
                 cache_age = time.time() - os.path.getmtime(cache_file)
-                if cache_age < 1800:  # 30分钟
+                if cache_age < 86400:  # 24小时（大幅延长，优先使用正确缓存）
                     with open(cache_file, 'r', encoding='utf-8') as f:
                         cached_data = json.load(f)
                     return cached_data['summary']
-            except:
+            except Exception as e:
+                # 如果读取缓存失败，打印错误但继续重新计算
+                print(f"⚠️  缓存读取失败: {e}")
                 pass
 
         df_zt = fetch_limit_up_stocks()
@@ -2576,14 +2578,19 @@ def build_chat_agent() -> AgentExecutor:
     """构建对话式股票分析Agent - 带知识库和短期记忆"""
 
     # 使用qwen-plus模型（更强的指令遵循能力）
+    # 彻底禁用streaming以避免LangChain的tool_calls bug
     llm = ChatTongyi(
         model_name="qwen-plus",
         temperature=0.1,
         dashscope_api_key=os.environ.get("DASHSCOPE_API_KEY"),
-        streaming=False,
-        incremental_output=False,
-        result_format="message",
-        max_retries=2
+        streaming=False,  # 禁用streaming
+        incremental_output=False,  # 禁用增量输出
+        result_format="message",  # 使用message格式
+        max_retries=2,
+        # 额外配置：确保不使用SSE（Server-Sent Events）
+        model_kwargs={
+            "stream": False,  # 明确禁用stream
+        }
     )
 
     tools = [
@@ -2767,13 +2774,81 @@ def interactive_test():
                 continue
 
             print("\n⏳ 正在分析...\n")
-            # 获取完整结果后再显示，避免流式输出
-            result = agent.invoke({"input": user_input})
-            output = result.get("output", "")
-            # 确保只显示最终结果，不显示中间过程
-            print("─" * 70)
-            print(output)
-            print("─" * 70)
+
+            # 添加重试机制，处理LangChain streaming bug
+            # 策略：每次重试都重建Agent，避免状态污染
+            max_retries = 3
+            success = False
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    # 第一次直接使用现有agent，后续重试则重建
+                    if attempt == 0:
+                        current_agent = agent
+                    else:
+                        print(f"⚠️  检测到streaming bug，正在重建Agent并重试（{attempt}/{max_retries-1}）...")
+                        import time
+                        time.sleep(1.0)  # 增加延迟到1秒
+                        # 重建agent（使用相同的配置但创建新实例）
+                        current_agent = build_chat_agent()
+
+                    result = current_agent.invoke({"input": user_input})
+                    output = result.get("output", "")
+                    # 确保只显示最终结果，不显示中间过程
+                    print("─" * 70)
+                    print(output)
+                    print("─" * 70)
+                    success = True
+
+                    # 如果重建了agent，更新全局引用
+                    if attempt > 0:
+                        agent = current_agent
+
+                    break  # 成功则退出重试循环
+
+                except IndexError as e:
+                    # 检查traceback是否包含tongyi.py相关的streaming错误
+                    import traceback
+                    tb_str = ''.join(traceback.format_tb(e.__traceback__))
+                    is_streaming_bug = ('tongyi.py' in tb_str and 'tool_calls' in tb_str)
+
+                    last_error = e
+
+                    if is_streaming_bug and attempt < max_retries - 1:
+                        continue  # 下一轮循环会重建agent
+                    else:
+                        # 最后一次重试也失败了，使用fallback方案
+                        if is_streaming_bug:
+                            print(f"\n⚠️  Agent重试失败，使用备用方案直接获取数据...\n")
+                            # 检测问题类型并直接调用工具
+                            query_lower = user_input.lower()
+                            if any(kw in query_lower for kw in ['接力', '连板', '最高板']):
+                                # 直接调用连板梯队工具
+                                from datetime import datetime
+                                today = datetime.now().strftime('%Y%m%d')
+                                cache_file = f'./data/limit_up_history/{today}_board_cache.json'
+                                try:
+                                    with open(cache_file, 'r', encoding='utf-8') as f:
+                                        cache_data = json.load(f)
+                                    summary = cache_data.get('summary', '')
+                                    print("─" * 70)
+                                    print("📊 今日连板梯队（直接数据）\n")
+                                    print(summary)
+                                    print("─" * 70)
+                                    success = True
+                                    break
+                                except:
+                                    pass
+
+                        if not success:
+                            raise  # 如果fallback也失败，抛出异常
+
+            if not success:
+                print(f"❌ 重试 {max_retries} 次均失败")
+                if last_error:
+                    print(f"   最后一次错误: {last_error}")
+                print("   建议：重新启动程序或稍后再试")
 
         except KeyboardInterrupt:
             print("\n\n👋 再见！")
